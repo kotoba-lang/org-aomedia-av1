@@ -208,6 +208,22 @@
 (def DCT_DCT 0)
 (def UV_DC_PRED 0)
 
+;; -- Inter zero-motion-baseline extension (ADR-2607122000 Migration step 9
+;; continuation, "first inter-frame support" -- mirrors org-iso-h264's task
+;; #20 zero-motion-baseline strategy): YMode values for inter blocks
+;; (07.bitstream.semantics.md #Inter block mode info semantics -- "the
+;; intra modes take values 0..13 so these YMode values start at 14") and
+;; the ref-frame enum (same order av1.frame-header uses). Only
+;; NEARESTMV/NEARMV/GLOBALMV/NEWMV are named (compound YModes NEAREST_
+;; NEARESTMV etc. are structurally unreachable here since read-ref-frame
+;; below restricts every block to a single, non-compound reference).
+(def NEARESTMV 14)
+(def NEARMV 15)
+(def GLOBALMV 16)
+(def NEWMV 17)
+(def INTRA_FRAME 0)
+(def LAST_FRAME 1)
+
 ;; ---------------------------------------------------------------------
 ;; Frame-level scope guard (checked once, at decode-block-fn construction).
 
@@ -241,7 +257,27 @@
     (when (pos? (:allow-intrabc frame-hdr))
       (bail! "allow_intrabc must be 0 (no use_intrabc CDF support)"))
     (when (not= :tx-mode-largest (:tx-mode frame-hdr))
-      (bail! "tx_mode must be TX_MODE_LARGEST (no tx_depth CDF support for TX_MODE_SELECT, and TX_MODE_ONLY_4X4 implies Lossless)"))))
+      (bail! "tx_mode must be TX_MODE_LARGEST (no tx_depth CDF support for TX_MODE_SELECT, and TX_MODE_ONLY_4X4 implies Lossless)"))
+    ;; Inter zero-motion-baseline extension (ADR-2607122000 Migration step 9
+    ;; continuation): additional frame-level guards for inter frames, all
+    ;; checkable once here since av1.frame-header already forces/reads
+    ;; these as real frame-header fields (see its own inter-frame guard).
+    ;; Per-block guards (avail-u?/avail-l?/mi-size/is_inter/ref-frame/
+    ;; y-mode/mv) are checked in `decode-block` itself, not here -- mirrors
+    ;; how the pre-existing intra guards above are split the same way.
+    (when-not (:frame-is-intra frame-hdr)
+      (when (not= 1 (:mono-chrome seq-hdr))
+        (bail! "inter frames: mono_chrome must be 1 (luma-only) -- chroma inter prediction is not implemented"))
+      (when (pos? (:reference-select frame-hdr))
+        (bail! "inter frames: reference_select must be 0 (no comp_mode/compound-reference support)"))
+      (when (pos? (:is-motion-mode-switchable frame-hdr))
+        (bail! "inter frames: is_motion_mode_switchable must be 0 (no use_obmc/motion_mode/find_warp_samples support)"))
+      (when (= :switchable (:interpolation-filter frame-hdr))
+        (bail! "inter frames: interpolation_filter must not be SWITCHABLE (no per-block interp_filter support)"))
+      (when (pos? (:use-ref-frame-mvs frame-hdr))
+        (bail! "inter frames: use_ref_frame_mvs must be 0 (no motion_field_estimation()/temporal-MV support)"))
+      (when (not (every? #(= :identity %) (:gm-type frame-hdr)))
+        (bail! "inter frames: every GmType must be IDENTITY (no ROTZOOM/TRANSLATION/AFFINE global-motion prediction support)")))))
 
 ;; ---------------------------------------------------------------------
 ;; Generic per-context CDF get/put, mirroring av1.tile-group's
@@ -356,6 +392,248 @@
       (throw (ex-info "av1.decode-block: out of scope: uv_mode not UV_DC_PRED"
                        {:reason :unsupported-uv-mode :uv-mode sym})))
     [sym state']))
+
+;; ---------------------------------------------------------------------
+;; Inter zero-motion-baseline extension (ADR-2607122000 Migration step 9
+;; continuation, "first inter-frame support" -- mirrors org-iso-h264's task
+;; #20 zero-motion-baseline strategy, adapted to AV1's much larger inter
+;; mode-info machinery). See namespace docstring's inter section for the
+;; exact scope boundary this validates: a single leaf covering the WHOLE
+;; frame (avail-u?/avail-l? both false, like this namespace's original
+;; DC_PRED-only milestone), single reference (LAST_FRAME only, no
+;; compound), GLOBALMV or NEWMV with a real, verified MV of (0,0) only.
+;;
+;; is_inter -- spec #Is inter syntax / 09.parsing.process.md "is_inter":
+;; ctx = 0 whenever AvailU/AvailL are both false (this namespace's only
+;; supported inter shape), which is the only ctx transcribed
+;; (av1.tables/Default-Is-Inter-Cdf has all 4 IS_INTER_CONTEXTS rows, but
+;; only row 0 is ever exercised here -- `read-is-inter` doesn't restrict
+;; the ctx itself since av1.tables already has the full table, only the
+;; DECODED is_inter value matters downstream).
+
+(defn- read-is-inter [state avail-u? avail-l? above-intra? left-intra?]
+  (let [ctx (cond
+              (and avail-u? avail-l?) (if (and left-intra? above-intra?) 3 (if (or left-intra? above-intra?) 1 0))
+              (or avail-u? avail-l?) (* 2 (if avail-u? (if above-intra? 1 0) (if left-intra? 1 0)))
+              :else 0)]
+    (read-cdf-symbol state :is-inter-cdf ctx (nth tables/Default-Is-Inter-Cdf ctx))))
+
+;; read_ref_frames() -- spec #Ref frames syntax, SINGLE_REFERENCE-only path
+;; (comp_mode is never read here since av1.decode-block/guard-frame-scope!
+;; requires reference_select==0, forcing comp_mode=SINGLE_REFERENCE with no
+;; bit read per spec: `if (reference_select && Min(bw4,bh4)>=2) comp_mode
+;; S() else comp_mode = SINGLE_REFERENCE`). Restricted to RefFrame[0] ==
+;; LAST_FRAME (single_ref_p1==0, single_ref_p3==0, single_ref_p4==0) --
+;; throws ex-info for any other decoded single-ref value (LAST2/LAST3/
+;; GOLDEN/BWDREF/ALTREF2/ALTREF_FRAME), matching this namespace's
+;; established restrict-then-throw pattern (read-y-mode/read-uv-mode
+;; above). ctx for single_ref_p1/p3/p4 (09.parsing.process.md's
+;; count_refs/ref_count_ctx, computed off AboveRefFrame/LeftRefFrame) is
+;; always 1 whenever AvailU/AvailL are both false (count_refs always
+;; returns 0 for both sides -> ref_count_ctx(0,0)==1) -- this namespace's
+;; only supported shape.
+
+(defn- read-ref-frame [state]
+  (let [ctx 1
+        [p1 state1] (read-cdf-symbol state :single-ref-p1-cdf ctx (get-in tables/Default-Single-Ref-Cdf [ctx 0]))]
+    (when (pos? p1)
+      (throw (ex-info "av1.decode-block: out of scope: single_ref_p1 != 0 (only LAST_FRAME is supported as a reference)"
+                       {:reason :unsupported-ref-frame})))
+    (let [[p3 state2] (read-cdf-symbol state1 :single-ref-p3-cdf ctx (get-in tables/Default-Single-Ref-Cdf [ctx 2]))]
+      (when (pos? p3)
+        (throw (ex-info "av1.decode-block: out of scope: single_ref_p3 != 0 (only LAST_FRAME is supported as a reference)"
+                         {:reason :unsupported-ref-frame})))
+      (let [[p4 state3] (read-cdf-symbol state2 :single-ref-p4-cdf ctx (get-in tables/Default-Single-Ref-Cdf [ctx 3]))]
+        (when (pos? p4)
+          (throw (ex-info "av1.decode-block: out of scope: single_ref_p4 != 0 (only LAST_FRAME is supported as a reference)"
+                           {:reason :unsupported-ref-frame})))
+        [LAST_FRAME state3]))))
+
+;; find_mv_stack(isCompound=0) -- spec 7.10.2, restricted to the ONE
+;; structurally-degenerate case this namespace's only supported leaf shape
+;; (avail-u?/avail-l? both false, i.e. a single leaf covering the whole
+;; frame) always produces: every scan_row/scan_col/scan_point/temporal-scan
+;; candidate search immediately no-ops (is_inside() is false for every
+;; candidate location adjacent to (0,0), spec #Is inside function --
+;; candidateR/candidateC < MiRowStart/MiColStart), so NumMvFound stays 0,
+;; NewMvCount stays 0, CloseMatches/TotalMatches both stay 0 through the
+;; whole process. The extra search process (7.10.2.12) then fills
+;; RefStackMv[0][0] and RefStackMv[1][0] with GlobalMvs[0] (without
+;; incrementing NumMvFound, per spec's own note) -- GlobalMvs[0] is (0,0)
+;; here because av1.decode-block/guard-frame-scope! already requires every
+;; GmType to be IDENTITY (setup global mv process, spec 7.10.2.1: `if (ref
+;; == INTRA_FRAME || typ == IDENTITY) { mv[0] = 0; mv[1] = 0 }`). The
+;; context and clamping process (7.10.2.14) then gives NewMvContext=
+;; Min(TotalMatches=0,1)=0, RefMvContext=TotalMatches=0, and ZeroMvContext
+;; stays 0 (only ever set by the temporal scan process, unreachable since
+;; use_ref_frame_mvs is forced 0 by av1.frame-header's inter-frame guard).
+;; This fn doesn't walk any of that machinery -- it just returns the
+;; already-known result, but throws (rather than silently returning the
+;; degenerate result) if the caller's avail-u?/avail-l? aren't both false,
+;; so a future wider-scope extension can't silently get a wrong answer
+;; from this narrow stand-in.
+(defn- find-mv-stack-degenerate [avail-u? avail-l?]
+  (when (or avail-u? avail-l?)
+    (throw (ex-info "av1.decode-block: out of scope: find_mv_stack() with a real spatial neighbor available (only the no-neighbor degenerate case is implemented)"
+                     {:reason :unsupported-find-mv-stack})))
+  {:global-mv [0 0] :new-mv-context 0 :zero-mv-context 0 :ref-mv-context 0})
+
+;; new_mv / zero_mv / ref_mv -- spec #Inter block mode info syntax's
+;; non-compound YMode-selection cascade + 09.parsing.process.md's
+;; TileNewMvCdf[NewMvContext]/TileZeroMvCdf[ZeroMvContext]/
+;; TileRefMvCdf[RefMvContext] cdf selection. `ref_mv` (-> NEARESTMV/NEARMV)
+;; IS now decoded (real-data finding: this extension's real aomenc/
+;; error-resilient/no-order-hint zero-motion fixture's real encoder chose
+;; NEARESTMV here, not GLOBALMV/NEWMV as originally guessed at design time
+;; -- confirmed by actually decoding and inspecting the real y-mode, not
+;; merely assumed, see test/av1/fixtures.clj's inter fixture docstring).
+;; This namespace's `RefMvIdx`/`assign_mv` derivation below (see
+;; `assign-mv`) shows NEARESTMV and NEARMV are legitimately, not just
+;; conveniently, in scope for the SAME reason GLOBALMV is: in this
+;; namespace's only supported degenerate find_mv_stack() case
+;; (find-mv-stack-degenerate, NumMvFound==0 throughout), the extra search
+;; process fills BOTH RefStackMv[0][0] and RefStackMv[1][0] with
+;; GlobalMvs[0] (== (0,0), see that fn's docstring) -- so whichever of
+;; RefStackMv[0]/RefStackMv[1] NEARESTMV/NEARMV's `pos` selects, the result
+;; is still exactly GlobalMvs[0], not an approximation for this exact
+;; scope.
+(defn- read-inter-y-mode [state new-mv-ctx zero-mv-ctx ref-mv-ctx]
+  (let [[new-mv state1] (read-cdf-symbol state :new-mv-cdf new-mv-ctx (nth tables/Default-New-Mv-Cdf new-mv-ctx))]
+    (if (zero? new-mv)
+      [NEWMV state1]
+      (let [[zero-mv state2] (read-cdf-symbol state1 :zero-mv-cdf zero-mv-ctx (nth tables/Default-Zero-Mv-Cdf zero-mv-ctx))]
+        (if (zero? zero-mv)
+          [GLOBALMV state2]
+          (let [[ref-mv state3] (read-cdf-symbol state2 :ref-mv-cdf ref-mv-ctx (nth tables/Default-Ref-Mv-Cdf ref-mv-ctx))]
+            [(if (zero? ref-mv) NEARESTMV NEARMV) state3]))))))
+
+;; read_mv(ref) / read_mv_component(comp) -- spec #MV syntax / #MV component
+;; syntax. Read IN FULL (not a zero-bit shortcut) even though this
+;; namespace only supports the resulting Mv being (0,0) -- assign-mv below
+;; throws if it's ever anything else, so a bitstream that genuinely codes a
+;; nonzero MV difference is rejected explicitly rather than silently
+;; mis-decoded (this repo's established "throw rather than guess"
+;; discipline, e.g. read-angle-delta-y/read-y-mode above).
+
+(defn- read-mv-component [state comp force-integer-mv? allow-high-precision-mv?]
+  (let [[mv-sign state1] (read-cdf-symbol state :mv-sign-cdf comp tables/Default-Mv-Sign-Cdf)
+        [mv-class state2] (read-cdf-symbol state1 :mv-class-cdf comp tables/Default-Mv-Class-Cdf)]
+    (if (zero? mv-class)
+      (let [[class0-bit state3] (read-cdf-symbol state2 :mv-class0-bit-cdf comp tables/Default-Mv-Class0-Bit-Cdf)
+            [class0-fr state4] (if force-integer-mv?
+                                  [3 state3]
+                                  (read-cdf-symbol state3 :mv-class0-fr-cdf [comp class0-bit]
+                                                    (nth tables/Default-Mv-Class0-Fr-Cdf class0-bit)))
+            [class0-hp state5] (if allow-high-precision-mv?
+                                  (read-cdf-symbol state4 :mv-class0-hp-cdf comp tables/Default-Mv-Class0-Hp-Cdf)
+                                  [1 state4])
+            mag (+ (bit-or (bit-shift-left class0-bit 3) (bit-shift-left class0-fr 1) class0-hp) 1)]
+        [(if (pos? mv-sign) (- mag) mag) state5])
+      (let [[d state3]
+            (reduce (fn [[d s] i]
+                      (let [[bit s'] (read-cdf-symbol s :mv-bit-cdf [comp i] (nth tables/Default-Mv-Bit-Cdf i))]
+                        [(bit-or d (bit-shift-left bit i)) s']))
+                    [0 state2] (range mv-class))
+            base-mag (bit-shift-left 2 (+ mv-class 2)) ;; CLASS0_SIZE(=2) << (mv_class+2)
+            [mv-fr state4] (if force-integer-mv?
+                              [3 state3]
+                              (read-cdf-symbol state3 :mv-fr-cdf comp tables/Default-Mv-Fr-Cdf))
+            [mv-hp state5] (if allow-high-precision-mv?
+                             (read-cdf-symbol state4 :mv-hp-cdf comp tables/Default-Mv-Hp-Cdf)
+                             [1 state4])
+            mag (+ base-mag (bit-or (bit-shift-left d 3) (bit-shift-left mv-fr 1) mv-hp) 1)]
+        [(if (pos? mv-sign) (- mag) mag) state5]))))
+
+(defn- read-mv [state force-integer-mv? allow-high-precision-mv?]
+  (let [[mv-joint state1] (read-cdf-symbol state :mv-joint-cdf [] tables/Default-Mv-Joint-Cdf)
+        ;; MV_JOINT_ZERO=0 MV_JOINT_HNZVZ=1 MV_JOINT_HZVNZ=2 MV_JOINT_HNZVNZ=3
+        [dr state2] (if (contains? #{2 3} mv-joint)
+                      (read-mv-component state1 0 force-integer-mv? allow-high-precision-mv?)
+                      [0 state1])
+        [dc state3] (if (contains? #{1 3} mv-joint)
+                      (read-mv-component state2 1 force-integer-mv? allow-high-precision-mv?)
+                      [0 state2])]
+    [[dr dc] state3]))
+
+;; assign_mv(isCompound=0) -- spec #Assign MV syntax, non-intrabc/non-
+;; compound path only. `pred-mv` is always (0,0) in this namespace's scope
+;; (find-mv-stack-degenerate's GlobalMvs[0]/RefStackMv[0][0]/
+;; RefStackMv[1][0] -- ALL THREE are the same (0,0) value here, see that
+;; fn's docstring). For GLOBALMV/NEARESTMV/NEARMV, Mv = PredMv with NO
+;; read_mv call (zero bits) -- per spec, `pos = (compMode==NEARESTMV) ? 0
+;; : RefMvIdx` selects RefStackMv[0] or RefStackMv[1] depending on which of
+;; NEARESTMV/NEARMV this is, but in this namespace's degenerate scope
+;; RefStackMv[0]==RefStackMv[1]==GlobalMvs[0], so `pred-mv` (passed in as
+;; find-mv-stack-degenerate's `:global-mv`, already exactly what
+;; RefStackMv[pos] would be for either pos) is correct for all three modes
+;; without needing to compute `pos`/track `RefMvIdx` at all -- and
+;; `RefMvIdx`'s own `drl_mode` reads are structurally unreachable anyway
+;; (`NumMvFound > idx+1` is always false when NumMvFound==0). For NEWMV,
+;; read_mv(0) IS called (real bits, see read-mv above) and Mv = PredMv +
+;; diffMv. Throws if the resulting Mv is ever anything other than (0,0) --
+;; this namespace's motion-compensation implementation
+;; (`predict-inter-block` below) only supports a (0,0) MV (a verified real
+;; zero, not an assumed one)."
+(defn- assign-mv [state y-mode pred-mv force-integer-mv? allow-high-precision-mv?]
+  (if (contains? #{GLOBALMV NEARESTMV NEARMV} y-mode)
+    [pred-mv state]
+    (let [[diff-mv state'] (read-mv state force-integer-mv? allow-high-precision-mv?)
+          mv [(+ (nth pred-mv 0) (nth diff-mv 0)) (+ (nth pred-mv 1) (nth diff-mv 1))]]
+      (when (not= [0 0] mv)
+        (throw (ex-info "av1.decode-block: out of scope: NEWMV resolved to a nonzero MV (only MV==(0,0) is supported)"
+                         {:reason :unsupported-nonzero-mv :mv mv})))
+      [mv state'])))
+
+;; read_motion_mode() -- spec #Read motion mode syntax. Restricted to the
+;; `!is_motion_mode_switchable -> motion_mode = SIMPLE, return` branch
+;; ONLY (av1.decode-block/guard-frame-scope! already requires
+;; is_motion_mode_switchable == 0 at the frame level for every inter frame
+;; this namespace supports, so every later guard in the real function
+;; -- block-size/GmType/has_overlappable_candidates/find_warp_samples --
+;; is structurally unreachable here and not implemented) -- zero bits read,
+;; motion_mode is always SIMPLE.
+
+;; read_compound_type()/read_interintra_mode() -- both are zero-bit no-ops
+;; in this namespace's scope: skip_mode is always 0 (guard-frame-scope!
+;; requires enable_order_hint==0, which per spec forces skipModeAllowed=0);
+;; isCompound is always 0 (read-ref-frame only ever returns a single,
+;; non-compound RefFrame[0]); interintra requires
+;; `enable_interintra_compound` (a sequence-header flag) -- this
+;; namespace's fixtures are all encoded with it disabled, so `interintra`
+;; is always 0 too (compound_type = COMPOUND_AVERAGE, no bits). Neither has
+;; a dedicated read fn here since there is genuinely nothing to read.
+
+;; ---------------------------------------------------------------------
+;; predict_inter (MV == (0,0) only) -- spec #Inter prediction process /
+;; #Motion vector scaling process / #Block inter prediction process,
+;; special-cased for this namespace's only supported motion vector: when
+;; mv == (0,0) and the reference frame is the same size as the current
+;; frame (no superres/scaling -- RefUpscaledWidth[refIdx] ==
+;; UpscaledWidth, RefFrameHeight[refIdx] == FrameHeight, both asserted
+;; below), the general subpel-scaling+8-tap-convolution machinery
+;; (av1.transform has no equivalent implementation) reduces exactly to an
+;; integer-aligned sample copy: the motion vector scaling process's
+;; `origX`/`origY` land exactly on `(x<<4)+halfSample`/`(y<<4)+halfSample`
+;; (mv contributes 0), `xScale`/`yScale` are exactly `1<<REF_SCALE_SHIFT`
+;; (no scaling), and the block inter prediction process's 8-tap filter at
+;; a zero subpel phase is the identity filter (`Subpel_Filters` row 0 is
+;; `{0,0,0,128,0,0,0,0}`, i.e. `Round2(128*CurrFrame[...], 7) ==
+;; CurrFrame[...]` after both the horizontal and vertical passes) -- so
+;; this narrow case is provably identical to a direct copy, not merely an
+;; approximation, PROVIDED mv is genuinely (0,0) and there is no scaling
+;; (both asserted, not assumed, below)."
+(defn- predict-inter-block
+  [ref-plane ref-frame-w ref-frame-h cur-frame-w cur-frame-h x y w h mv]
+  (when (not= [0 0] mv)
+    (throw (ex-info "av1.decode-block: out of scope: predict_inter with mv != (0,0) (no subpel/8-tap-filter motion compensation implemented)"
+                     {:reason :unsupported-inter-mv :mv mv})))
+  (when (or (not= ref-frame-w cur-frame-w) (not= ref-frame-h cur-frame-h))
+    (throw (ex-info "av1.decode-block: out of scope: predict_inter with a differently-sized reference frame (no motion-vector-scaling support)"
+                     {:reason :unsupported-inter-scaling
+                      :ref-frame-w ref-frame-w :ref-frame-h ref-frame-h
+                      :cur-frame-w cur-frame-w :cur-frame-h cur-frame-h})))
+  (vec (for [i (range h), j (range w)]
+         (nth ref-plane (+ (* (+ y i) ref-frame-w) x j)))))
 
 ;; ---------------------------------------------------------------------
 ;; Footprint-wide grid writes (spec #Decode block syntax's per-block loops
@@ -493,43 +771,77 @@
 ;; av1.transform, see its namespace docstring) throws.
 
 (defn- get-tx-set
-  "spec #Get transform set function, is_inter==0 branch only (this repo is
-   intra-only). Returns :dctonly / :intra-1 / :intra-2 (keyword-encoded,
-   see Tx-Type-Intra-Inv-Set1/2's docstring for why keywords)."
-  [tx-sz reduced-tx-set?]
+  "spec #Get transform set function, both is_inter branches (the is_inter==1
+   branch added by the inter zero-motion-baseline extension, ADR-2607122000
+   Migration step 9 continuation). Returns :dctonly / :intra-1 / :intra-2 /
+   :inter-1 / :inter-2 / :inter-3 (keyword-encoded, see Tx-Type-Intra-Inv-
+   Set1/2's docstring for why keywords). For TX_32X32 (this repo's only
+   inter tx size), `txSzSqrUp == TX_32X32` -- per spec this is
+   :dctonly for is_inter==0 (unchanged from before this extension) but
+   :inter-3 for is_inter==1 (`if (reduced_tx_set || txSzSqrUp == TX_32X32)
+   return TX_SET_INTER_3`, checked BEFORE the is_inter==0 branch's own
+   `txSzSqrUp == TX_32X32 -> TX_SET_DCTONLY` check) -- i.e. inter TX_32X32
+   blocks are NOT zero-bit DCT_DCT-forced the way intra TX_32X32 blocks
+   are; a real `inter_tx_type` cdf read against
+   `Default-Inter-Tx-Type-Set3-Cdf[Tx_Size_Sqr[txSz]]` picks between
+   {IDTX,DCT_DCT} (see `read-transform-type` below)."
+  [tx-sz reduced-tx-set? is-inter?]
   (let [tx-sz-sqr (nth tables/Tx-Size-Sqr tx-sz)
         tx-sz-sqr-up (nth tables/Tx-Size-Sqr-Up tx-sz)]
     (cond
       (> tx-sz-sqr-up tables/TX_32X32) :dctonly
+      is-inter?
+      (cond
+        (or reduced-tx-set? (= tx-sz-sqr-up tables/TX_32X32)) :inter-3
+        (= tx-sz-sqr tables/TX_16X16) :inter-2
+        :else :inter-1)
       (= tx-sz-sqr-up tables/TX_32X32) :dctonly
       reduced-tx-set? :intra-2
       (= tx-sz-sqr tables/TX_16X16) :intra-2
       :else :intra-1)))
 
 (defn- read-transform-type
-  "spec #Transform type syntax's `transform_type(x4,y4,txSz)`, is_inter==0
-   branch. `y-mode` is the block's actual YMode (== intraDir, since
-   use_filter_intra is always 0 in this scope -- see 09.parsing.process.md
-   \"intra_tx_type\" cdf selection). `base-q-idx`/`reduced-tx-set?` come
-   from the frame header. Returns [tx-type state'] where tx-type is one of
-   the keywords :DCT_DCT/:ADST_DCT/:DCT_ADST/:ADST_ADST (throws for any
-   other decoded value -- see namespace docstring)."
-  [state tx-sz y-mode base-q-idx reduced-tx-set?]
-  (let [set (get-tx-set tx-sz reduced-tx-set?)]
+  "spec #Transform type syntax's `transform_type(x4,y4,txSz)`, both
+   is_inter branches (the is_inter==1 branch added by the inter
+   zero-motion-baseline extension). `y-mode` is the block's actual YMode
+   (== intraDir for is_inter==0, since use_filter_intra is always 0 in this
+   scope -- see 09.parsing.process.md \"intra_tx_type\" cdf selection; not
+   consulted at all for is_inter==1, since `inter_tx_type`'s cdf is
+   selected purely by `Tx_Size_Sqr[txSz]`, no YMode dimension).
+   `base-q-idx`/`reduced-tx-set?` come from the frame header. Returns
+   [tx-type state'] where tx-type is one of the keywords
+   :DCT_DCT/:ADST_DCT/:DCT_ADST/:ADST_ADST (is_inter==0) or :DCT_DCT
+   (is_inter==1, the only supported TX_SET_INTER_3 outcome -- throws for
+   :IDTX, see namespace docstring's ADST/inter sections)."
+  [state tx-sz y-mode base-q-idx reduced-tx-set? is-inter?]
+  (let [set (get-tx-set tx-sz reduced-tx-set? is-inter?)]
     (if (or (= set :dctonly) (zero? base-q-idx))
       [:DCT_DCT state]
-      (let [tx-sz-sqr (nth tables/Tx-Size-Sqr tx-sz)
-            ctx-key [tx-sz-sqr y-mode]
-            [cdf-key default-row inv-table]
-            (if (= set :intra-1)
-              [:intra-tx-type-set1-cdf (nth tables/Default-Intra-Tx-Type-Set1-Cdf-4x4-Dc-V-H y-mode) tables/Tx-Type-Intra-Inv-Set1]
-              [:intra-tx-type-set2-cdf tables/Default-Intra-Tx-Type-Set2-Cdf-Uniform tables/Tx-Type-Intra-Inv-Set2])
-            [sym state'] (read-cdf-symbol state cdf-key ctx-key default-row)
-            tx-type (nth inv-table sym)]
-        (when (contains? #{:IDTX :V-DCT :H-DCT} tx-type)
-          (throw (ex-info "av1.decode-block: out of scope: transform_type decoded outside {DCT_DCT,ADST_DCT,DCT_ADST,ADST_ADST}"
-                           {:reason :unsupported-tx-type :tx-type tx-type})))
-        [tx-type state']))))
+      (if is-inter?
+        (case set
+          :inter-3
+          (let [tx-sz-sqr (nth tables/Tx-Size-Sqr tx-sz)
+                [sym state'] (read-cdf-symbol state :inter-tx-type-set3-cdf tx-sz-sqr
+                                               (nth tables/Default-Inter-Tx-Type-Set3-Cdf tx-sz-sqr))
+                tx-type (nth tables/Tx-Type-Inter-Inv-Set3 sym)]
+            (when (= tx-type :IDTX)
+              (throw (ex-info "av1.decode-block: out of scope: inter transform_type decoded as IDTX (no identity-transform reconstruction)"
+                               {:reason :unsupported-tx-type :tx-type tx-type})))
+            [tx-type state'])
+          (throw (ex-info "av1.decode-block: out of scope: inter transform_type set not TX_SET_INTER_3 (no TX_SET_INTER_1/2 CDF tables transcribed)"
+                           {:reason :unsupported-inter-tx-set :set set})))
+        (let [tx-sz-sqr (nth tables/Tx-Size-Sqr tx-sz)
+              ctx-key [tx-sz-sqr y-mode]
+              [cdf-key default-row inv-table]
+              (if (= set :intra-1)
+                [:intra-tx-type-set1-cdf (nth tables/Default-Intra-Tx-Type-Set1-Cdf-4x4-Dc-V-H y-mode) tables/Tx-Type-Intra-Inv-Set1]
+                [:intra-tx-type-set2-cdf tables/Default-Intra-Tx-Type-Set2-Cdf-Uniform tables/Tx-Type-Intra-Inv-Set2])
+              [sym state'] (read-cdf-symbol state cdf-key ctx-key default-row)
+              tx-type (nth inv-table sym)]
+          (when (contains? #{:IDTX :V-DCT :H-DCT} tx-type)
+            (throw (ex-info "av1.decode-block: out of scope: transform_type decoded outside {DCT_DCT,ADST_DCT,DCT_ADST,ADST_ADST}"
+                             {:reason :unsupported-tx-type :tx-type tx-type})))
+          [tx-type state'])))))
 
 ;; ---------------------------------------------------------------------
 ;; coeffs() -- spec #Coefficients syntax (5.11.39), generalized over
@@ -763,7 +1075,7 @@
    [eob quant tx-type state'] (tx-type added for the ADST extension --
    plane>0 and the all_zero==1 case always return :DCT_DCT, matching the
    spec's forced/no-op TxType assignments in those cases)."
-  [state q-idx row col mi-cols mi-rows txb-skip-ctx spec y-mode base-q-idx reduced-tx-set?]
+  [state q-idx row col mi-cols mi-rows txb-skip-ctx spec y-mode base-q-idx reduced-tx-set? is-inter?]
   (let [{:keys [plane bwl w seg-eob scan tx-sz
                 txb-skip-cdf-key txb-skip-table
                 eob-pt-cdf-key eob-pt-table eob-extra-cdf-key eob-extra-table
@@ -779,17 +1091,21 @@
        (-> state1 (record-above! plane col w4 0 0) (record-left! plane row h4 0 0))]
       (let [dc-sign-ctx (get-dc-sign-ctx state1 plane col row w4 h4 mi-cols mi-rows)
             ;; transform_type()/read-transform-type is luma-only (plane==0)
-            ;; -- for TX_32X32 this remains a zero-bit forced :DCT_DCT read
-            ;; (see read-transform-type's docstring); for TX_4X4 (ADST
-            ;; extension) this is a REAL cdf read that can produce
-            ;; :ADST_DCT/:DCT_ADST/:ADST_ADST too. chroma's TxType is
-            ;; :DCT_DCT with zero bits unconditionally for this namespace's
-            ;; UV_DC_PRED-only scope (see namespace docstring) via a
-            ;; DIFFERENT code path (compute_tx_type()'s Mode_To_Txfm[UVMode],
-            ;; not transform_type()) -- so plane>0 never calls
-            ;; read-transform-type at all.
+            ;; -- for TX_32X32/is_inter==0 this remains a zero-bit forced
+            ;; :DCT_DCT read (see read-transform-type's docstring); for
+            ;; TX_32X32/is_inter==1 (inter zero-motion-baseline extension)
+            ;; this IS now a real cdf read (TX_SET_INTER_3); for TX_4X4
+            ;; (ADST extension, intra-only) this is a REAL cdf read that
+            ;; can produce :ADST_DCT/:DCT_ADST/:ADST_ADST too. chroma's
+            ;; TxType is :DCT_DCT with zero bits unconditionally for this
+            ;; namespace's UV_DC_PRED-only scope (see namespace docstring)
+            ;; via a DIFFERENT code path (compute_tx_type()'s
+            ;; Mode_To_Txfm[UVMode], not transform_type()) -- so plane>0
+            ;; never calls read-transform-type at all (and is_inter is
+            ;; irrelevant there, since color+inter is out of scope, guarded
+            ;; by av1.decode-block/guard-frame-scope!).
             [tx-type state1b] (if (zero? plane)
-                                 (read-transform-type state1 tx-sz y-mode base-q-idx reduced-tx-set?)
+                                 (read-transform-type state1 tx-sz y-mode base-q-idx reduced-tx-set? is-inter?)
                                  [:DCT_DCT state1])
             [eob state2] (read-eob state1b q-idx eob-pt-cdf-key eob-pt-table eob-extra-cdf-key eob-extra-table)
             ;; level pass: c = eob-1 downto 0 (spec: `for (c = eob-1; c >= 0; c--)`)
@@ -893,8 +1209,17 @@
    or UV_DC_PRED (plane>0, always 0). `row`/`col` are the leaf's LUMA mi
    position (this fn derives the plane's own subsampled position/pixel
    coordinates internally via `:subx`/`:suby` in `spec`). `reduced-tx-set?`
-   comes from the frame header (ADST extension -- see read-transform-type)."
-  [state frame-hdr row col avail-u? avail-l? q-idx mode spec reduced-tx-set?]
+   comes from the frame header (ADST extension -- see read-transform-type).
+   `inter-ref` (inter zero-motion-baseline extension, ADR-2607122000
+   Migration step 9 continuation) is nil for every intra call site
+   (unchanged behavior) or a map `{:ref-plane :ref-frame-w :ref-frame-h
+   :mv}` for an inter luma call -- when non-nil, prediction comes from
+   `predict-inter-block` (a reference-frame sample copy, see its
+   docstring) instead of `predict-intra`, and `mode`/`avail-u?`/`avail-l?`
+   are not consulted for prediction (though `mode` is still passed through
+   to `read-coeffs`/`read-transform-type` as the block's YMode, unused
+   there for is_inter==1 -- see read-transform-type's docstring)."
+  [state frame-hdr row col avail-u? avail-l? q-idx mode spec reduced-tx-set? inter-ref]
   (let [{:keys [plane w subx suby delta-q-dc delta-q-ac plane-key tx-sz]} spec
         log2 (case w 32 5 16 4 4 2)
         mi-cols (:mi-cols frame-hdr) mi-rows (:mi-rows frame-hdr)
@@ -904,7 +1229,10 @@
         x (* 4 pcol) y (* 4 prow)
         w4 (bit-shift-right w 2)
         plane0 (or (get state plane-key) (vec (repeat (* frame-w frame-h) 0)))
-        pred (predict-intra mode plane0 frame-w frame-h x y avail-l? avail-u? log2 log2 8)
+        pred (if inter-ref
+               (predict-inter-block (:ref-plane inter-ref) (:ref-frame-w inter-ref) (:ref-frame-h inter-ref)
+                                     frame-w frame-h x y w w (:mv inter-ref))
+               (predict-intra mode plane0 frame-w frame-h x y avail-l? avail-u? log2 log2 8))
         plane1 (write-block plane0 frame-w x y w w pred)
         state1 (assoc state plane-key plane1)
         txb-skip-ctx (if (zero? plane)
@@ -912,7 +1240,7 @@
                        (get-txb-skip-ctx-chroma state1 plane pcol prow w4 w4 w w w w plane-mi-cols plane-mi-rows))
         base-q-idx (:base-q-idx frame-hdr)
         [eob quant tx-type state2] (read-coeffs state1 q-idx prow pcol plane-mi-cols plane-mi-rows txb-skip-ctx spec
-                                                 mode base-q-idx reduced-tx-set?)]
+                                                 mode base-q-idx reduced-tx-set? (boolean inter-ref))]
     (if (pos? eob)
       (let [clip3 (fn [lo hi v] (cond (< v lo) lo (> v hi) hi :else v))
             dc-q-index (clip3 0 255 (+ base-q-idx delta-q-dc))
@@ -993,10 +1321,27 @@
    (guard-frame-scope!) if `frame-hdr`/`seq-hdr` are outside this
    namespace's supported scope -- callers should catch/report before this
    point if they want a softer failure mode than an exception at
-   construction time."
-  [frame-hdr seq-hdr]
+   construction time.
+
+   `ref-frame` (inter zero-motion-baseline extension, ADR-2607122000
+   Migration step 9 continuation -- optional, defaults nil) is a map
+   `{:luma-plane <flat row-major reconstructed luma plane vector>
+     :frame-width <int> :frame-height <int>}` describing the ALREADY-
+   DECODED reference frame (LAST_FRAME) for an inter `frame-hdr` -- callers
+   decode the keyframe first (via this same fn with `ref-frame` omitted)
+   and pass its `:luma-plane`/`:frame-width`/`:frame-height` through here
+   for the following inter frame. Required (throws if nil) whenever
+   `(:frame-is-intra frame-hdr)` is false; ignored for intra frames."
+  ([frame-hdr seq-hdr] (make-decode-block-fn frame-hdr seq-hdr nil))
+  ([frame-hdr seq-hdr ref-frame]
   (guard-frame-scope! frame-hdr seq-hdr)
-  (let [q-idx (tables/q-ctx-idx (:base-q-idx frame-hdr))
+  (let [frame-is-intra? (boolean (:frame-is-intra frame-hdr))
+        _ (when (and (not frame-is-intra?) (nil? ref-frame))
+            (throw (ex-info "av1.decode-block: inter frame requires :ref-frame (the reconstructed reference luma plane) to be supplied to make-decode-block-fn"
+                             {:reason :missing-ref-frame})))
+        force-integer-mv? (= 1 (:force-integer-mv frame-hdr))
+        allow-high-precision-mv? (= 1 (:allow-high-precision-mv frame-hdr))
+        q-idx (tables/q-ctx-idx (:base-q-idx frame-hdr))
         enable-cdef? (pos? (:enable-cdef seq-hdr))
         enable-filter-intra? (pos? (:enable-filter-intra seq-hdr))
         coded-lossless? (pos? (:coded-lossless frame-hdr))
@@ -1029,6 +1374,75 @@
       (when (and color? (not= mi-size tg/BLOCK_32X32))
         (throw (ex-info "av1.decode-block: out of scope: shared chroma block (luma leaf mi-size != BLOCK_32X32) not supported for color frames"
                          {:reason :unsupported-shared-chroma-block :mi-size mi-size})))
+      (if (not frame-is-intra?)
+        ;; -- inter_frame_mode_info() (spec #Inter frame mode info syntax),
+        ;; inter zero-motion-baseline extension (ADR-2607122000 Migration
+        ;; step 9 continuation) -- see namespace docstring's inter section
+        ;; for the exact scope boundary. Restricted to a single leaf
+        ;; covering the WHOLE frame (avail-u?/avail-l? both false, the
+        ;; only shape find-mv-stack-degenerate/read-is-inter's ctx
+        ;; derivation above support) and BLOCK_32X32 (this namespace's
+        ;; only supported inter mi-size, matching luma-spec-32/TX_32X32).
+        (do
+          (when (or avail-u? avail-l?)
+            (throw (ex-info "av1.decode-block: out of scope: inter block with a real spatial neighbor available (only a single whole-frame leaf is supported)"
+                             {:reason :unsupported-inter-avail-neighbor})))
+          (when (not= mi-size tg/BLOCK_32X32)
+            (throw (ex-info "av1.decode-block: out of scope: inter block mi-size != BLOCK_32X32"
+                             {:reason :unsupported-inter-mi-size :mi-size mi-size})))
+          ;; read_skip_mode(): skip_mode_present is forced 0 by
+          ;; guard-frame-scope! (enable_order_hint==0 -> skipModeAllowed=0
+          ;; unconditionally, see av1.frame-header/parse-skip-mode-params),
+          ;; so per spec's own `if (!skip_mode_present || ...) skip_mode =
+          ;; 0` this is always a zero-bit skip_mode=0 -- read_skip() below
+          ;; is therefore always reached (spec: `if (skip_mode) skip = 1
+          ;; else read_skip()`).
+          (let [[skip state1] (read-skip state row col avail-u? avail-l?)
+                state1 (read-cdef state1 row col (pos? skip) coded-lossless? enable-cdef? allow-intrabc?)
+                ;; inter_segment_id(): segmentation_enabled forced 0 by
+                ;; guard-frame-scope!, so segment_id=0 (no read), same as
+                ;; the intra path.
+                [is-inter state2] (read-is-inter state1 avail-u? avail-l? false false)]
+            (when (zero? is-inter)
+              (throw (ex-info "av1.decode-block: out of scope: is_inter == 0 (an intra block signaled within an inter frame -- intra_block_mode_info()) not supported"
+                               {:reason :unsupported-intra-block-in-inter-frame})))
+            (let [[ref-frame-val state3] (read-ref-frame state2)
+                  mv-stack (find-mv-stack-degenerate avail-u? avail-l?)
+                  [y-mode state4] (read-inter-y-mode state3 (:new-mv-context mv-stack) (:zero-mv-context mv-stack) (:ref-mv-context mv-stack))
+                  [mv state5] (assign-mv state4 y-mode (:global-mv mv-stack) force-integer-mv? allow-high-precision-mv?)
+                  ;; read_motion_mode()/read_interintra_mode()/
+                  ;; read_compound_type()/per-block interp_filter: all
+                  ;; zero-bit no-ops in this namespace's scope (see the
+                  ;; comments right above read-mv-component's section
+                  ;; header for why each one is structurally unreachable
+                  ;; here) -- no bits consumed, no fn calls needed.
+                  tx-sz (tx-size-for mi-size)
+                  luma-w4 (bit-shift-right 32 2)
+                  state6 (-> state5
+                             (record-footprint! :skips row col mi-size skip)
+                             (record-footprint! :y-modes row col mi-size y-mode))
+                  inter-ref {:ref-plane (:luma-plane ref-frame)
+                             :ref-frame-w (:frame-width ref-frame)
+                             :ref-frame-h (:frame-height ref-frame)
+                             :mv mv}]
+              (if (pos? skip)
+                ;; reset_block_context() + predict-only (mirrors the intra
+                ;; skip path below, but via predict_inter instead of
+                ;; predict_intra).
+                (let [frame-w (* 4 (:mi-cols frame-hdr)) frame-h (* 4 (:mi-rows frame-hdr))
+                      x (* 4 col) y (* 4 row)
+                      pred (predict-inter-block (:ref-plane inter-ref) (:ref-frame-w inter-ref) (:ref-frame-h inter-ref)
+                                                 frame-w frame-h x y 32 32 mv)
+                      plane0 (or (:luma-plane state6) (vec (repeat (* frame-w frame-h) 0)))
+                      plane1 (write-block plane0 frame-w x y 32 32 pred)
+                      state7 (-> state6
+                                 (assoc :luma-plane plane1)
+                                 (record-above! 0 col luma-w4 0 0)
+                                 (record-left! 0 row luma-w4 0 0))]
+                  [{:skip true :tx-size tx-sz :y-mode y-mode :is-inter true :ref-frame ref-frame-val :mv mv} state7])
+                (let [[luma-result state7] (decode-transform-block state6 frame-hdr row col avail-u? avail-l? q-idx y-mode luma-spec-32 reduced-tx-set? inter-ref)
+                      luma-result (assoc luma-result :skip false :tx-size tx-sz :y-mode y-mode :is-inter true :ref-frame ref-frame-val :mv mv)]
+                  [luma-result state7])))))
       (let [[skip state1] (read-skip state row col avail-u? avail-l?)
             state1 (read-cdef state1 row col (pos? skip) coded-lossless? enable-cdef? allow-intrabc?)
             ;; intra_segment_id(): segmentation_enabled forced 0 by
@@ -1106,10 +1520,10 @@
                             state4 [u-spec v-spec])
                            state4)]
               [{:skip true :tx-size tx-sz :y-mode y-mode :uv-mode uv-mode} state5])
-            (let [[luma-result state4] (decode-transform-block state3 frame-hdr row col avail-u? avail-l? q-idx y-mode luma-spec reduced-tx-set?)
+            (let [[luma-result state4] (decode-transform-block state3 frame-hdr row col avail-u? avail-l? q-idx y-mode luma-spec reduced-tx-set? nil)
                   luma-result (assoc luma-result :skip false :tx-size tx-sz :y-mode y-mode :uv-mode uv-mode)]
               (if color?
-                (let [[u-result state5] (decode-transform-block state4 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED u-spec reduced-tx-set?)
-                      [v-result state6] (decode-transform-block state5 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED v-spec reduced-tx-set?)]
+                (let [[u-result state5] (decode-transform-block state4 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED u-spec reduced-tx-set? nil)
+                      [v-result state6] (decode-transform-block state5 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED v-spec reduced-tx-set? nil)]
                   [(assoc luma-result :u-eob (:eob u-result) :v-eob (:eob v-result)) state6])
-                [luma-result state4]))))))))
+                [luma-result state4]))))))))))

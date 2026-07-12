@@ -48,18 +48,23 @@ reconstruction namespaces added below):
 | `av1.bitreader` | MSB-first bit reader + descriptor primitives: `f(n)`, `uvlc()`, `le(n)`, `leb128()`, `su(n)`, `ns(n)`, `byte_alignment()`, `skip-bits` (position-only advance, for `exit_symbol()`) |
 | `av1.obu` | `obu_header()` / `obu_extension_header()` / the top-level OBU loop -- every OBU is self-delimiting via `leb128 obu_size`, so unparsed payload can always be skipped byte-exactly to the next OBU |
 | `av1.sequence-header` | full `sequence_header_obu()`: profile/still-picture/timing-info/decoder-model-info/operating-points/frame dimensions/`color_config()` |
-| `av1.frame-header` | **the full `uncompressed_header()`**, intra frames only (`KEY_FRAME`/`INTRA_ONLY_FRAME`): frame_type/show_frame/showable_frame, frame size (`frame_size()`/`superres_params()`/`render_size()`), `tile_info()`, `quantization_params()`, `segmentation_params()`, `delta_q_params()`/`delta_lf_params()`, the `CodedLossless`/`AllLossless` computation, `loop_filter_params()`, `cdef_params()`, `lr_params()`, `read_tx_mode()`, `frame_reference_mode()`/`skip_mode_params()`/`global_motion_params()` (all zero-bit passthroughs since FrameIsIntra is always 1 in this phase's scope), `reduced_tx_set`, and `film_grain_params()`. Also now carries `use-128x128-superblock`/`mono-chrome`/`num-planes`/`subsampling-x`/`subsampling-y` through to the top-level returned map (bugfix, see below) |
+| `av1.frame-header` | **the full `uncompressed_header()`** for intra frames (`KEY_FRAME`/`INTRA_ONLY_FRAME`), plus, per the inter zero-motion-baseline extension below, `INTER_FRAME` within a narrow `error_resilient_mode==1`/`enable_order_hint==0` scope: frame_type/show_frame/showable_frame, frame size (`frame_size()`/`superres_params()`/`render_size()`), the inter-only `ref_frame_idx[]`/`read_interpolation_filter()`/`is_motion_mode_switchable`/`use_ref_frame_mvs` fields, `tile_info()`, `quantization_params()`, `segmentation_params()`, `delta_q_params()`/`delta_lf_params()`, the `CodedLossless`/`AllLossless` computation, `loop_filter_params()`, `cdef_params()`, `lr_params()`, `read_tx_mode()`, `frame_reference_mode()`/`skip_mode_params()`/`global_motion_params()` (real reads for inter frames now, not just zero-bit intra passthroughs), `reduced_tx_set`, and `film_grain_params()`. Also now carries `use-128x128-superblock`/`mono-chrome`/`num-planes`/`subsampling-x`/`subsampling-y` through to the top-level returned map (bugfix, see below) |
 | `av1.bool-decoder` | the AV1 "Symbol decoder" (daala-derived non-binary arithmetic coder, spec 8.2): `init_symbol`/`read_bool`/`read_literal`/`read_symbol`/`exit_symbol` with CDF adaptation. Wholly separate implementation from H.264's CAVLC/CABAC (`h264.cavlc`) -- different coding scheme entirely |
 | `av1.tile-group` | `tile_group_obu()`'s entry (tile start/end, per-tile `init_symbol`/`exit_symbol`) + `decode_partition()` (spec 5.11.4) fully implemented: real default CDF tables (`Default_Partition_W8/W16/W32/W64/W128_Cdf`), real `partition`/`split_or_horz`/`split_or_vert` context derivation (AvailU/AvailL via a MiSizes grid this namespace maintains), real bool-decoder symbol reads -- down to every leaf partition. `decode_block()` is now called at every leaf **when the caller supplies** an injectable `:decode-block-fn` (see `av1.decode-block` below) -- existing callers that don't supply one keep the original "leaf recorded, no further bits consumed" behavior this namespace has always documented |
-| `av1.tables` | AV1 constant tables for coefficient decode/dequant/inverse transform/intra prediction: `Dc-Qlookup-8bit`/`Ac-Qlookup-8bit` (8-bit dequant lookup), `Cos128-Lookup`, `Default-Scan-32x32`, `Intra-Mode-Context-Dc-V-H`/`MAX_ANGLE_DELTA`/`Default-Angle-Delta-Cdf` (mode-coverage extension, see below), `Sm-Weights-Tx-4x4`/`8x8`/`16x16`/`32x32`/`64x64` (SMOOTH mode-coverage extension, see below), and the `Default_*_Cdf` tables (`Skip`/`Intra-Frame-Y-Mode`/`Txb-Skip`/`Eob-Pt-1024`/`Eob-Extra`/`Dc-Sign`/`Coeff-Base-Eob`/`Coeff-Base`/`Coeff-Br`) sliced to this phase's supported scope (TX_32X32 only, luma only). Chroma extension (see below): the SAME q-ctx-idx x TX_16X16 x chroma(ptype=1) slices of those same spec tables (`Default-Txb-Skip-Cdf-16x16-Chroma`/`Default-Eob-Pt-256-Cdf-Chroma`/`Default-Eob-Extra-Cdf-16x16-Chroma`/`Default-Dc-Sign-Cdf-Chroma`/`Default-Coeff-Base-Eob-Cdf-16x16-Chroma`/`Default-Coeff-Base-Cdf-16x16-Chroma`/`Default-Coeff-Br-Cdf-16x16-Chroma`), plus `Default-Scan-16x16` and `Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H` (see namespace docstring's chroma section for exactly how each was extracted/spot-checked) |
+| `av1.tables` | AV1 constant tables for coefficient decode/dequant/inverse transform/intra prediction: `Dc-Qlookup-8bit`/`Ac-Qlookup-8bit` (8-bit dequant lookup), `Cos128-Lookup`, `Default-Scan-32x32`, `Intra-Mode-Context-Dc-V-H`/`MAX_ANGLE_DELTA`/`Default-Angle-Delta-Cdf` (mode-coverage extension, see below), `Sm-Weights-Tx-4x4`/`8x8`/`16x16`/`32x32`/`64x64` (SMOOTH mode-coverage extension, see below), and the `Default_*_Cdf` tables (`Skip`/`Intra-Frame-Y-Mode`/`Txb-Skip`/`Eob-Pt-1024`/`Eob-Extra`/`Dc-Sign`/`Coeff-Base-Eob`/`Coeff-Base`/`Coeff-Br`) sliced to this phase's supported scope (TX_32X32 only, luma only). Chroma extension (see below): the SAME q-ctx-idx x TX_16X16 x chroma(ptype=1) slices of those same spec tables (`Default-Txb-Skip-Cdf-16x16-Chroma`/`Default-Eob-Pt-256-Cdf-Chroma`/`Default-Eob-Extra-Cdf-16x16-Chroma`/`Default-Dc-Sign-Cdf-Chroma`/`Default-Coeff-Base-Eob-Cdf-16x16-Chroma`/`Default-Coeff-Base-Cdf-16x16-Chroma`/`Default-Coeff-Br-Cdf-16x16-Chroma`), plus `Default-Scan-16x16` and `Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H` (see namespace docstring's chroma section for exactly how each was extracted/spot-checked). Inter zero-motion-baseline extension (see below): `Default-Is-Inter-Cdf`/`Default-Single-Ref-Cdf`/`Default-New-Mv-Cdf`/`Default-Zero-Mv-Cdf`/`Default-Ref-Mv-Cdf`/`Default-Inter-Tx-Type-Set3-Cdf`/`Tx-Type-Inter-Inv-Set3` and the full MV-syntax table family (`Default-Mv-Joint-Cdf`/`Default-Mv-Sign-Cdf`/`Default-Mv-Class-Cdf`/`Default-Mv-Class0-Bit-Cdf`/`Default-Mv-Class0-Fr-Cdf`/`Default-Mv-Class0-Hp-Cdf`/`Default-Mv-Bit-Cdf`/`Default-Mv-Fr-Cdf`/`Default-Mv-Hp-Cdf`) |
 | `av1.transform` | dequantization (`dequantize`) + the AV1 inverse DCT (`inverse-dct!`, spec 7.13.2.3's generic butterfly-network algorithm, transcribed in full for n=2..6/TX_4X4..TX_64X64) + the 2D inverse transform process (`inverse-transform-2d`, row transform -> clip -> column transform) -- already fully generic over transform size, so the chroma extension below (TX_16X16) needed NO changes here at all: `inverse-dct!`'s n=4 branch and `dq-denom`'s TX_16X16 case were already transcribed in full generality alongside luma's n=5/TX_32X32 (only n=5/TX_32X32 was exercised against real data before the chroma extension; n=4/TX_16X16 now is too) |
 | `av1.intra-pred` | DC/V/H/PAETH/SMOOTH intra prediction (`dc-predict`/`v-predict`/`h-predict`/`paeth-predict`/`smooth-predict`, spec 7.11.2.4/7.11.2.5/7.11.2.2/7.11.2.6) -- DC's all four haveLeft/haveAbove cases implemented (though the original single-block fixtures only exercise the "neither available" case); V_PRED/H_PRED added in the mode-coverage extension below, both exercised against real multi-leaf data with a genuine avail-above/avail-left neighbor (not just the degenerate no-neighbor fallback); PAETH_PRED added in the PAETH mode-coverage extension below (the first mode here needing the topleft-corner `AboveRow[-1]`/`LeftCol[-1]` sample, via the new `above-row-corner` helper), also exercised against real multi-leaf data; SMOOTH_PRED added in the SMOOTH mode-coverage extension below (a genuine two-edge weighted blend via `Sm-Weights-Tx-*`, reusing the same `above-row-fn`/`left-col-fn` accessors PAETH_PRED uses), also exercised against real multi-leaf data with both a genuine avail-above AND avail-left neighbor. `dc-predict` is plane-agnostic (frame-w/frame-h/x/y/log2W/log2H are all caller-supplied), so the chroma extension below reuses it as-is for UV_DC_PRED -- no changes needed here either |
-| `av1.decode-block` | **decode_block()** (spec 5.11.5) for this phase's narrow validated scope: `intra_frame_mode_info()` (`read_skip`/`read_cdef`/`intra_frame_y_mode`/`intra_angle_info_y`/`uv_mode`/`filter_intra_mode_info`'s conditional guard), `read_block_tx_size()`, `residual()`/`transform_block()`/`coeffs()` (all_zero/transform_type/eob_pt_1024 or eob_pt_256/eob_extra/coeff_base/coeff_base_eob/coeff_br/dc_sign/sign_bit/golomb, with real per-context CDF persistence+adaptation, including cross-block dc_sign/txb_skip context via per-plane AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext), and reconstruction (predict_intra + dequantize + inverse_transform_2d + clip) -- for BOTH luma (plane 0, TX_32X32) and, per the chroma extension below, U/V (planes 1/2, TX_16X16, 4:2:0). See its namespace docstring for the exact scope boundary and why each boundary was chosen (frame-level `guard-frame-scope!` throws for out-of-scope streams) |
+| `av1.decode-block` | **decode_block()** (spec 5.11.5) for this phase's narrow validated scope: `intra_frame_mode_info()` (`read_skip`/`read_cdef`/`intra_frame_y_mode`/`intra_angle_info_y`/`uv_mode`/`filter_intra_mode_info`'s conditional guard), `read_block_tx_size()`, `residual()`/`transform_block()`/`coeffs()` (all_zero/transform_type/eob_pt_1024 or eob_pt_256/eob_extra/coeff_base/coeff_base_eob/coeff_br/dc_sign/sign_bit/golomb, with real per-context CDF persistence+adaptation, including cross-block dc_sign/txb_skip context via per-plane AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext), and reconstruction (predict_intra + dequantize + inverse_transform_2d + clip) -- for BOTH luma (plane 0, TX_32X32) and, per the chroma extension below, U/V (planes 1/2, TX_16X16, 4:2:0). Per the inter zero-motion-baseline extension below, also `inter_frame_mode_info()`/`inter_block_mode_info()` (`read_is_inter`/`read_ref_frames`/a degenerate `find_mv_stack()`/`new_mv`/`zero_mv`/`ref_mv`/`assign_mv`/`read_mv`) and `predict_inter` (a reference-frame-copy motion compensation, `predict-inter-block`, for the one supported motion vector, `(0,0)`) for `INTER_FRAME`s. See its namespace docstring for the exact scope boundary and why each boundary was chosen (frame-level `guard-frame-scope!` throws for out-of-scope streams) |
 
-**Explicitly NOT implemented (next phase)**: inter frames (`frame_type ==
-INTER_FRAME`) and `show_existing_frame == 1` (both need cross-frame
-reference-frame state this phase doesn't track -- `av1.frame-header/parse`
-throws `ex-info` rather than silently mis-parsing them), `segmentation_params()`
+**Explicitly NOT implemented (next phase)**: inter frames beyond the
+narrow zero-motion-baseline scope added below (`### Inter zero-motion-
+baseline extension`) -- `SWITCH_FRAME`, `frame_size_override_flag &&
+!error_resilient_mode` (`frame_size_with_refs()`), `enable_order_hint ==
+1` inter frames, compound/multi-reference prediction, any nonzero motion
+vector, and more, see that section's "Explicitly NOT covered" list -- and
+`show_existing_frame == 1` (needs cross-frame `RefFrameType` state this
+phase doesn't track -- `av1.frame-header/parse` throws `ex-info` rather
+than silently mis-parsing it), `segmentation_params()`
 when `primary_ref_frame != PRIMARY_REF_NONE` (needs cross-frame segmentation-
 map state -- structurally unreachable for the intra frames this phase
 supports, since `primary-ref-frame` is always forced to `PRIMARY_REF_NONE`
@@ -79,12 +84,16 @@ SMOOTH_PRED (luma) or UV_DC_PRED (chroma, see below), any transform size other t
 TX_4X4 (luma)/TX_16X16 (chroma), 4:2:2/4:4:4 chroma subsampling, and
 segmentation/delta-Q/delta-LF/screen-content-tools/intra-BC are all
 explicitly out of scope and throw `ex-info` rather than silently
-mis-decoding. Inter
-prediction, loop-filter/CDEF/loop-restoration in-loop filtering, and film
-grain synthesis remain fully unimplemented (this phase's fixtures disable
-all in-loop filtering at the encoder, so the raw reconstruction this phase
-produces already matches the reference decoder's output without needing
-to implement any of them -- see Validation below).
+mis-decoding. Inter prediction is now implemented for the narrow
+zero-motion-baseline scope described below (`### Inter zero-motion-
+baseline extension`) -- everything outside that scope (subpel motion
+compensation, compound/multi-reference prediction, OBMC/warped motion,
+etc.) remains unimplemented. Loop-filter/CDEF/loop-restoration in-loop
+filtering and film grain synthesis remain fully unimplemented (this
+phase's fixtures disable all in-loop filtering at the encoder, so the raw
+reconstruction this phase produces already matches the reference
+decoder's output without needing to implement any of them -- see
+Validation below).
 
 ### Mode-coverage extension: V_PRED / H_PRED (ADR-2607122000 Migration step 9, continued)
 
@@ -561,6 +570,215 @@ correctly) excludes SMOOTH_PRED with no code change.
   throws `ex-info` if the real encoder ever picks either); D45/D135/D113/
   D157/D203/D67 (directional modes with nonzero angle, same as the PAETH
   extension's note above).
+
+### Inter zero-motion-baseline extension (ADR-2607122000 Migration step 9, continued -- first inter-frame support)
+
+This repo's first pixel-reconstruction milestones above were all
+**intra-only** (keyframes). This extension adds the first real support for
+**inter frames** (`frame_type == INTER_FRAME`), narrowed the same way
+`org-iso-h264`'s task #20 narrowed its own first inter-frame milestone:
+start from real, unmodified static content where an actual encoder's own
+motion search lands on effectively zero motion, rather than hand-crafting a
+bitstream or assuming what the encoder would choose. Fetched/transcribed
+2026-07-13 from AOMediaCodec/av1-spec master (06.bitstream.syntax.md
+#Uncompressed header syntax / #Interpolation filter syntax / #Frame
+reference mode syntax / #Skip mode params syntax / #Global motion params
+syntax / #Inter frame mode info syntax / #Is inter syntax / #Ref frames
+syntax / #Inter block mode info syntax / #Assign MV syntax / #MV syntax /
+#MV component syntax / #Get transform set function / #Transform type
+syntax, 07.bitstream.semantics.md, 08.decoding.process.md #Motion vector
+prediction processes (7.10.2, "Find MV stack process" and its
+sub-processes) / #Inter prediction process, 09.parsing.process.md's cdf
+selection for `is_inter`/`single_ref_p1..p6`/`new_mv`/`zero_mv`/`ref_mv`/
+`inter_tx_type`/mv syntax elements, 10.additional.tables.md).
+
+**Scope, and why it's narrow enough to still be exact (not an
+approximation)**: a single leaf covering the WHOLE frame (`av1.tile-group`
+needed no changes at all -- `avail-u?`/`avail-l?` are simply both false
+for this shape, the same precondition the very first DC_PRED-only intra
+milestone relied on), single reference (`LAST_FRAME` only, no compound),
+and `error_resilient_mode == 1` + `enable_order_hint == 0` at the frame
+level (both real, checkable frame-header fields, enforced by
+`av1.frame-header/parse`'s inter-frame guard and
+`av1.decode-block/guard-frame-scope!`'s inter-frame guards) -- these two
+flags alone collapse an enormous amount of AV1's inter-frame machinery
+into zero-bit or trivially-computed cases, not by luck but by the spec's
+own conditionals:
+
+- `error_resilient_mode == 1` forces `primary_ref_frame =
+  PRIMARY_REF_NONE` (so CDFs reset to the spec's defaults exactly like a
+  keyframe, no cross-frame CDF-state carryover to implement),
+  `use_ref_frame_mvs = 0` (no `motion_field_estimation()`/temporal-MV
+  scan needed), `allow_warped_motion = 0` (no warped-motion syntax at
+  all), and (combined with `frame_size_override_flag` never both true and
+  `!error_resilient_mode`) always the plain `frame_size()`/`render_size()`
+  path over `frame_size_with_refs()` (which would need cross-frame
+  `RefUpscaledWidth`/`RefFrameHeight` state).
+- `enable_order_hint == 0` forces `frame_refs_short_signaling = 0`
+  (`set_frame_refs()`'s short-signaling derivation never needed -- every
+  one of the 7 `ref_frame_idx[i]` slots is a real, always-present `f(3)`
+  read) and `skipModeAllowed = 0` unconditionally (`skip_mode_params()`'s
+  entire `forwardIdx`/`backwardIdx` `RefOrderHint` search is structurally
+  unreachable, not merely unexercised).
+- Every `GmType` forced `IDENTITY` (`av1.decode-block/guard-frame-scope!`
+  throws otherwise) makes `GLOBALMV`'s predicted motion vector exactly
+  `(0,0)` (setup global mv process, spec 7.10.2.1) -- the load-bearing
+  fact this whole extension's "zero motion" claim rests on.
+- With no available spatial neighbor (this namespace's only supported
+  leaf shape) and `use_ref_frame_mvs=0`, **every** candidate-search step
+  of `find_mv_stack()` (spec 7.10.2's scan_row/scan_col/scan_point/
+  temporal-scan processes) is a structural no-op: `is_inside()` (spec
+  #Is inside function) is false for every candidate location adjacent to
+  `(0,0)` (they're outside `MiRowStart`/`MiColStart`), so `NumMvFound`
+  never leaves 0. The extra search process (7.10.2.12) then fills BOTH
+  `RefStackMv[0][0]` and `RefStackMv[1][0]` with `GlobalMvs[0]` (== `(0,0)`)
+  without incrementing `NumMvFound` (per the spec's own note) -- this is
+  the ONE case `av1.decode-block/find-mv-stack-degenerate` implements
+  (throws for any other `avail-u?`/`avail-l?` combination rather than
+  silently returning a wrong answer). The context and clamping process
+  (7.10.2.14) then gives `NewMvContext = Min(TotalMatches=0,1) = 0`,
+  `RefMvContext = TotalMatches = 0`, `ZeroMvContext = 0` -- all fixed,
+  real values, not guessed.
+
+**Real-data finding that changed the original design**: this extension was
+designed expecting the real encoder to choose `GLOBALMV` or `NEWMV` (the
+task's original framing). Actually decoding the real fixture showed the
+encoder chose **`NEARESTMV`** instead (`new_mv=1`, `zero_mv=1`, `ref_mv=0`)
+-- confirmed by inspection, not assumed. Rather than treat this as
+out-of-scope, `av1.decode-block/read-inter-y-mode`/`assign-mv` show
+NEARESTMV (and, by the identical argument, NEARMV) resolve to exactly the
+same `(0,0)` motion vector as GLOBALMV in this exact degenerate scope --
+since `RefStackMv[0][0] == RefStackMv[1][0] == GlobalMvs[0]` per the extra
+search process above, whichever of the two stack slots
+NEARESTMV/NEARMV's `pos` selects is still `(0,0)`, not an approximation.
+`RefMvIdx`'s own `drl_mode` reads are structurally unreachable too
+(`NumMvFound > idx+1` is always false when `NumMvFound == 0`). NEWMV
+remains supported as designed (`read_mv()`/`read_mv_component()`
+transcribed in full, spec #MV syntax / #MV component syntax -- real bits,
+not a shortcut) -- `assign-mv` throws if a real bitstream's NEWMV ever
+resolves to a nonzero MV, since `av1.decode-block/predict-inter-block`
+only implements the `(0,0)` motion-compensation case (see below).
+
+**Reference-frame buffer**: `av1.decode-block/make-decode-block-fn` gained
+an optional third `ref-frame` argument -- a map `{:luma-plane
+:frame-width :frame-height}` describing the ALREADY-DECODED keyframe's
+reconstructed luma plane. Callers decode the keyframe first (this
+namespace's existing intra path, unchanged), then pass its `:luma-plane`
+through to build the inter frame's `decode-block-fn`. This is the ONLY
+"reference frame buffer" this extension implements -- there's no
+multi-frame DPB/ref_frame_idx-indexed buffer management, since this
+namespace only ever supports a 2-frame (keyframe + one inter frame)
+sequence with a single stored reference.
+
+**Motion compensation (`predict-inter-block`)**: per the task's own
+sanctioned simplification (mirroring `org-iso-h264`'s zero-motion
+baseline), a genuinely `(0,0)` motion vector with no reference-frame
+scaling (`av1.decode-block` asserts both, throws otherwise) makes the
+general subpel-scaling + 8-tap-convolution machinery (spec #Motion vector
+scaling process / #Block inter prediction process) provably reduce to a
+direct, integer-aligned sample copy from the reference plane -- not
+merely a shortcut assumed equivalent: the motion vector scaling process's
+`origX`/`origY` land exactly on the unshifted sample center (`mv`
+contributes 0), there is no scale (`xScale`/`yScale` both exactly
+`1<<REF_SCALE_SHIFT`), and the block inter prediction process's 8-tap
+filter at zero subpel phase is the identity filter (`Subpel_Filters` row
+0 is `{0,0,0,128,0,0,0,0}`, i.e. `Round2(128*sample, 7) == sample`).
+`av1.transform`/`av1.intra-pred` needed no changes -- inter blocks reuse
+the SAME `decode-transform-block`/`read-coeffs`/dequantize/inverse-DCT
+pipeline luma intra blocks already use, just with `predict-inter-block`'s
+reference-copy prediction (via a new `inter-ref` parameter) instead of
+`predict-intra`.
+
+**`transform_type()`/`get_tx_set()` needed a genuinely new branch for
+inter blocks** (not reused as-is from intra): unlike intra TX_32X32 (where
+`Tx_Size_Sqr_Up[TX_32X32] == TX_32X32` forces `TX_SET_DCTONLY`, zero
+bits), the SAME check for `is_inter == 1` forces `TX_SET_INTER_3`
+instead (spec #Get transform set function: `if (is_inter) { if
+(reduced_tx_set || txSzSqrUp == TX_32X32) return TX_SET_INTER_3 }` --
+checked BEFORE the `is_inter==0` branch's own DCTONLY case) -- a REAL
+2-symbol `inter_tx_type` cdf read against
+`Default-Inter-Tx-Type-Set3-Cdf[Tx_Size_Sqr[TX_32X32]]` (spot-checked:
+`TileInterTxTypeSet3Cdf[Tx_Size_Sqr[txSz]]`, NOT indexed by q_ctx_idx like
+this repo's other coefficient tables), decoding to `{IDTX, DCT_DCT}` --
+`IDTX` throws (no identity-transform reconstruction, same restriction as
+the ADST extension's `V_DCT`/`H_DCT`). This means inter TX_32X32 blocks
+are NOT zero-bit-forced DCT_DCT the way intra TX_32X32 blocks are --
+confirmed by real data (see below): the residual fixture's real inter
+block DOES read a real `inter_tx_type` bit (decoding to `:DCT_DCT`).
+
+**`is_inter`/`read_ref_frames()`/`new_mv`/`zero_mv`/`ref_mv` real cdf
+reads** (`av1.decode-block/read-is-inter`/`read-ref-frame`/
+`read-inter-y-mode`): `is_inter`'s ctx is 0 for this namespace's only
+supported (no-neighbor) shape (the full 4-context
+`Default-Is-Inter-Cdf` table is transcribed, but only row 0 is ever
+exercised); `read-ref-frame` restricts `RefFrame[0]` to `LAST_FRAME`
+(`single_ref_p1==0`, `single_ref_p3==0`, `single_ref_p4==0`, ctx=1 for all
+three per `count_refs`/`ref_count_ctx` with no neighbors) -- throws for
+any other decoded reference (structurally reachable in the general spec,
+but this namespace's only stored reference IS `LAST_FRAME`, so this is
+exact for its scope, not an artificial restriction). `comp_mode` is never
+read at all (`reference_select == 0`, guaranteed by
+`guard-frame-scope!`), so `read-ref-frame` never needs the compound
+branch.
+
+**Explicitly NOT covered by this extension**: compound prediction (2
+references averaged/weighted); any reference other than `LAST_FRAME`;
+OBMC/local-warped motion (`read_motion_mode()` -- `is_motion_mode_switchable
+== 0` is required at the frame level, guaranteed by
+`guard-frame-scope!`, so `motion_mode` is always `SIMPLE` with zero bits,
+and the general function's block-size/`GmType`/
+`has_overlappable_candidates`/`find_warp_samples` guards are never
+reached); interintra (`enable_interintra_compound` must be 0);
+`SWITCHABLE` interpolation filter (`interpolation_filter` must be a fixed
+frame-level value, not `SWITCHABLE` -- this namespace's fixtures all
+decode a fixed `EIGHTTAP`, so no per-block `interp_filter` reads are ever
+needed; guarded, not merely unexercised); any nonzero global motion type
+(ROTZOOM/TRANSLATION/AFFINE); any real spatial neighbor for
+`find_mv_stack()` (multi-leaf inter frames, i.e. more than one leaf per
+frame, are out of scope -- `av1.decode-block` throws
+`:unsupported-inter-avail-neighbor` rather than silently mis-predicting);
+chroma (Cb/Cr) for inter frames (monochrome only, guarded); any nonzero
+motion vector (subpel motion compensation, needing the real 8-tap
+`Subpel_Filters` convolution, is not implemented); `SWITCH_FRAME`;
+`frame_id_numbers_present_flag`'s cross-frame `RefValid`/`mark_ref_frames`
+tracking (the per-ref `delta_frame_id_minus_1` bits ARE read to keep bit
+position correct -- this repo's real fixtures have
+`frame_id_numbers_present_flag == 1`, an aomenc default -- but the
+resulting `expectedFrameId[]` is discarded, not tracked).
+
+**Real-decode validation**: two new REAL aomenc (libaom 3.14.1)-encoded
+32x32 MONOCHROME 2-frame (keyframe + inter) sequences (see
+`test/av1/fixtures.clj`'s `inter-32x32-zeromv-bytes`/
+`inter-32x32-zeromv-residual-bytes` docstrings for the full aomenc
+invocations and real-encoder findings):
+
+- `inter-32x32-zeromv`: both frames byte-identical content (the same
+  two-axis brightness-ramp family as `keyframe-32x32-gradient-bytes`).
+  Confirmed by actually decoding: frame 2 is a real `INTER_FRAME` with
+  `error_resilient_mode=1`, `primary_ref_frame=PRIMARY_REF_NONE`,
+  `ref_frame_idx=[0 0 0 0 0 0 0]`, `is_motion_mode_switchable=0`,
+  `interpolation_filter=EIGHTTAP` (not SWITCHABLE), every `GmType=IDENTITY`
+  -- and the one leaf decodes `is_inter=1`, `RefFrame[0]=LAST_FRAME`,
+  `YMode=NEARESTMV` (14, the real-data surprise above), real decoded
+  `Mv=(0,0)`, `skip=true` (zero residual -- `aomdec --framestats` confirms
+  frame 2's `qp,128`, the max qindex, with only 31 bytes of payload). Both
+  frames' full reconstructions are bit-exact (no tolerance) against
+  dav1d's independent decode of the same bitstream. See
+  `test/av1/decode_block_test.clj`'s `inter-zeromv-bit-exact-test`.
+- `inter-32x32-zeromv-residual`: frame 2 adds a per-pixel checkerboard
+  perturbation (+/-6, no translational structure for a real motion search
+  to exploit) to the same base ramp, forcing a genuine nonzero residual
+  while keeping the real motion search at zero motion -- exercises
+  `decode-transform-block`'s `inter-ref` residual-add path (predict_inter
+  THEN coeffs()/dequantize/inverse-DCT/reconstruct) for the first time.
+  Confirmed by actually decoding: same `is_inter=1`/`RefFrame[0]=LAST_FRAME`/
+  `YMode=NEARESTMV`/`Mv=(0,0)` as above, but `skip=false`, a real
+  `inter_tx_type` cdf read decoding `:DCT_DCT` (not `:IDTX`), `eob=1024`
+  (every coefficient position nonzero -- the checkerboard content is
+  maximally high-frequency), and the full reconstruction (predict_inter +
+  real coefficient decode + dequantize + inverse DCT + reconstruct) is
+  bit-exact against dav1d's independent decode. See
+  `test/av1/decode_block_test.clj`'s `inter-zeromv-residual-bit-exact-test`.
 
 ## Validation
 

@@ -715,3 +715,155 @@
    docstring."
   []
   (load-resource "av1/fixtures/keyframe-64x64-smooth.dav1d.yuv"))
+
+(defn inter-32x32-zeromv-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 32x32 MONOCHROME 2-FRAME sequence
+   (keyframe + inter frame) -- this repo's FIRST inter-frame fixture
+   (ADR-2607122000 Migration step 9 continuation, \"first inter-frame
+   support\" -- zero-motion baseline, mirroring org-iso-h264's task #20
+   strategy: start from a real static-content encode where the encoder's
+   own RD search naturally lands on a zero (or effectively zero) motion
+   vector, rather than hand-picking one). Both frames are the SAME 32x32
+   two-axis brightness ramp as `keyframe-32x32-gradient-bytes` (base 128
+   +/-20 across x, +/-4 across y, authored as known raw pixel bytes, not a
+   lavfi filter), forming a real y4m 2-frame sequence.
+
+   The aomenc invocation adds, on top of the same disabled-everything-but-
+   DC/NONE/TX_32X32 baseline `keyframe-32x32-gradient-bytes` uses:
+   `--error-resilient=1` (forces `primary_ref_frame=PRIMARY_REF_NONE`,
+   `use_ref_frame_mvs=0`, `allow_warped_motion=0`, and `frame_size()` over
+   `frame_size_with_refs()` -- see av1.frame-header's inter-frame guard),
+   `--enable-order-hint=0` (forces `frame_refs_short_signaling=0` and
+   `skipModeAllowed=0` -- see av1.frame-header/parse-skip-mode-params),
+   `--enable-global-motion=0`/`--enable-warped-motion=0`/
+   `--enable-ref-frame-mvs=0` (keep every GmType IDENTITY and
+   use_ref_frame_mvs=0, both required by av1.decode-block/
+   guard-frame-scope!), and `--enable-obmc=0`/every compound-related flag
+   (`--enable-masked-comp=0` etc.) disabled (this namespace's inter scope
+   has no compound/OBMC/interintra support):
+
+     aomenc --codec=av1 --limit=2 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=0 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --tile-columns=0 --tile-rows=0 \\
+       --min-partition-size=32 --max-partition-size=32 \\
+       --error-resilient=1 --enable-order-hint=0 --enable-global-motion=0 \\
+       --enable-warped-motion=0 --enable-ref-frame-mvs=0 \\
+       --enable-obmc=0 --enable-masked-comp=0 --enable-interintra-comp=0 \\
+       --enable-dist-wtd-comp=0 --enable-onesided-comp=0 \\
+       --enable-interinter-wedge=0 --enable-interintra-wedge=0 \\
+       --kf-min-dist=2 --kf-max-dist=2 --lag-in-frames=0 \\
+       --obu -o inter-32x32-zeromv.obu inter-32x32-zeromv.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i inter-32x32-zeromv.obu -o
+   inter-32x32-zeromv.dav1d.yuv` (dav1d 1.5.3, a completely independent AV1
+   decoder) produced the raw 8-bit gray 32x32 luma planes for BOTH frames
+   (2048 bytes total, 1024 per frame) checked in as
+   `inter-32x32-zeromv.dav1d.yuv` -- see
+   `inter-32x32-zeromv-golden-yuv`/`inter-32x32-zeromv-frame-count` below
+   and test/av1/decode_block_test.clj for the bit-exact comparison against
+   this repo's decoder (both frames). `aomdec --framestats` independently
+   confirms the second frame's `qp,128` (max qindex -- the real encoder
+   found the second frame needs essentially no signal at all, since it's
+   byte-identical content) with only 31 bytes of payload.
+
+   Empirically confirmed by actually decoding and inspecting the real
+   syntax elements this repo's decoder reads (not assumed): frame 2 is a
+   real `frame_type == INTER_FRAME` (1) with `error_resilient_mode == 1`,
+   `primary_ref_frame == PRIMARY_REF_NONE` (7), `ref_frame_idx == [0 0 0 0
+   0 0 0]` (all 7 slots point at the one stored reference, LAST_FRAME
+   included), `is_motion_mode_switchable == 0`, `interpolation_filter ==
+   0` (EIGHTTAP, NOT SWITCHABLE -- so no per-block interp_filter reads are
+   ever needed), every `GmType == IDENTITY`, and the single BLOCK_32X32
+   leaf decodes `is_inter=1`, `RefFrame[0]=LAST_FRAME`, and -- the one
+   real surprise versus this extension's original design guess of
+   \"GLOBALMV or NEWMV\" -- `YMode == NEARESTMV` (14), with the real
+   decoded MV genuinely (0,0) (confirmed by actually reading `new_mv`/
+   `zero_mv`/`ref_mv` and assign_mv's degenerate-find-mv-stack derivation,
+   not assumed) and `skip == true` (zero residual, no coeffs() call at
+   all). See av1.decode-block/read-inter-y-mode's docstring for why
+   NEARESTMV is legitimately (not just conveniently) in scope for this
+   exact degenerate case."
+  []
+  (load-resource "av1/fixtures/inter-32x32-zeromv.obu"))
+
+(defn inter-32x32-zeromv-golden-yuv
+  "dav1d's raw 8-bit gray decode of `inter-32x32-zeromv-bytes` -- BOTH
+   frames concatenated (2048 bytes: frame 1's 1024-byte luma plane then
+   frame 2's), row-major each -- the independent ground truth
+   test/av1/decode_block_test.clj compares this repo's decoder output
+   against, per frame."
+  []
+  (load-resource "av1/fixtures/inter-32x32-zeromv.dav1d.yuv"))
+
+(defn inter-32x32-zeromv-residual-bytes
+  "A second REAL aomenc-encoded 32x32 MONOCHROME 2-frame sequence (same
+   scope/aomenc-flag baseline as `inter-32x32-zeromv-bytes`, see its
+   docstring for the full invocation and rationale -- this fixture adds
+   `--enable-flip-idtx=0` and uses `--cq-level=20` instead of 32, both
+   just to keep the encoder's TX_SET_INTER_3 search restricted to
+   {DCT_DCT,IDTX} and to make sure SOME residual survives quantization),
+   but frame 2 is NOT byte-identical to frame 1 -- it adds a per-pixel
+   checkerboard perturbation (+6 where `(x+y) mod 2 == 0`, -6 otherwise,
+   clamped to [0,255]) to the same base ramp. This keeps the real
+   encoder's motion search at zero motion (the checkerboard has no
+   translational structure a nonzero MV could exploit -- there's nothing
+   for a real search to gain by looking elsewhere) while forcing a
+   genuinely nonzero, high-frequency residual, exercising this extension's
+   `decode-transform-block`+`inter-ref` residual-add path (predict_inter
+   via a reference-frame copy, THEN coeffs()/dequantize/inverse-transform/
+   reconstruct on top of it) for the first time -- `inter-32x32-zeromv-
+   bytes` above only ever exercises the all-skip (zero-residual, predict-
+   only) path.
+
+     aomenc --codec=av1 --limit=2 --passes=1 --end-usage=q --cq-level=20 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=0 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --tile-columns=0 --tile-rows=0 \\
+       --min-partition-size=32 --max-partition-size=32 \\
+       --error-resilient=1 --enable-order-hint=0 --enable-global-motion=0 \\
+       --enable-warped-motion=0 --enable-ref-frame-mvs=0 \\
+       --enable-obmc=0 --enable-masked-comp=0 --enable-interintra-comp=0 \\
+       --enable-dist-wtd-comp=0 --enable-onesided-comp=0 \\
+       --enable-interinter-wedge=0 --enable-interintra-wedge=0 \\
+       --enable-flip-idtx=0 --kf-min-dist=2 --kf-max-dist=2 --lag-in-frames=0 \\
+       --obu -o inter-32x32-zeromv-residual.obu inter-32x32-zeromv-residual.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i inter-32x32-zeromv-residual.obu -o
+   inter-32x32-zeromv-residual.dav1d.yuv` (dav1d 1.5.3) produced the raw
+   8-bit gray 32x32 luma planes for both frames (2048 bytes total) checked
+   in as `inter-32x32-zeromv-residual.dav1d.yuv`. `aomdec --framestats`
+   independently confirms frame 2's `qp,80` (much finer than the
+   zeromv fixture's max-qindex frame 2, consistent with real signal being
+   coded). Empirically confirmed by actually decoding: frame 2 again
+   decodes `is_inter=1`, `RefFrame[0]=LAST_FRAME`, `YMode=NEARESTMV`,
+   real decoded `Mv==(0,0)` -- but this time `skip=false`, a real
+   `coeffs()` call with `eob=1024` (every coefficient position nonzero --
+   the checkerboard content is maximally high-frequency) and TxType
+   decoded (a REAL `inter_tx_type` cdf read against TX_SET_INTER_3, see
+   av1.decode-block/read-transform-type's docstring) as `:DCT_DCT` (not
+   `:IDTX`), and this repo's full reconstruction (predict_inter + real
+   coefficient decode + dequantize + inverse DCT + reconstruct) is
+   bit-exact (no tolerance) against dav1d's independent decode of the same
+   bitstream. See test/av1/decode_block_test.clj's inter residual test."
+  []
+  (load-resource "av1/fixtures/inter-32x32-zeromv-residual.obu"))
+
+(defn inter-32x32-zeromv-residual-golden-yuv
+  "dav1d's raw 8-bit gray decode of `inter-32x32-zeromv-residual-bytes` --
+   see `inter-32x32-zeromv-golden-yuv` docstring for the same
+   both-frames-concatenated pattern."
+  []
+  (load-resource "av1/fixtures/inter-32x32-zeromv-residual.dav1d.yuv"))

@@ -699,6 +699,126 @@
         (is (= 64 (count luma-plane)))
         (is (= golden luma-plane))))))
 
+;; ---------------------------------------------------------------------
+;; Inter zero-motion-baseline extension (ADR-2607122000 Migration step 9
+;; continuation, "first inter-frame support") -- see av1.decode-block's
+;; namespace docstring's inter section and test/av1/fixtures.clj's
+;; `inter-32x32-zeromv-bytes`/`inter-32x32-zeromv-residual-bytes`
+;; docstrings for the exact scope/real-encoder findings this validates.
+
+(defn- find-all-obus
+  "Like `find-obu` but returns every OBU in `bytes`, in order -- needed here
+   since a 2-frame sequence has two `:obu-frame`s (find-obu only ever
+   returns the first match)."
+  [bytes]
+  (loop [r (br/make-reader bytes) acc []]
+    (let [o (obu/parse-obu r)]
+      (if (>= (:payload-end o) (* 8 (count bytes)))
+        (conj acc o)
+        (recur (obu/seek r (:payload-end o)) (conj acc o))))))
+
+(defn- decode-inter-sequence
+  "Decodes a real 2-OBU_FRAME sequence (keyframe then inter frame) end to
+   end: parses the sequence header once, decodes frame 1 via the existing
+   intra `make-decode-block-fn` path, then decodes frame 2 as an inter
+   frame by passing frame 1's reconstructed luma plane through as
+   `make-decode-block-fn`'s `ref-frame` argument (see its docstring).
+   Returns {:frame-header-1 :frame-header-2 :leaf-2 :luma-1 :luma-2}."
+  [bytes]
+  (let [obus (find-all-obus bytes)
+        seq-obu (some #(when (= :obu-sequence-header (get-in % [:header :obu-type-kw])) %) obus)
+        seq-hdr (sh/parse (:reader-at-payload seq-obu))
+        frame-obus (filterv #(= :obu-frame (get-in % [:header :obu-type-kw])) obus)
+        _ (assert (= 2 (count frame-obus)) "expected exactly 2 OBU_FRAMEs")
+        frame-hdr-1 (fh/parse (:reader-at-payload (nth frame-obus 0)) seq-hdr)
+        decode-block-fn-1 (db/make-decode-block-fn frame-hdr-1 seq-hdr)
+        result-1 (tg/parse-frame-obu (nth frame-obus 0) seq-hdr {:decode-block-fn decode-block-fn-1})
+        tile-1 (first (:tiles (:tile-group result-1)))
+        luma-1 (:luma-plane (:final-tile-state tile-1))
+        frame-hdr-2 (fh/parse (:reader-at-payload (nth frame-obus 1)) seq-hdr)
+        ref-frame {:luma-plane luma-1
+                   :frame-width (:frame-width frame-hdr-1)
+                   :frame-height (:frame-height frame-hdr-1)}
+        decode-block-fn-2 (db/make-decode-block-fn frame-hdr-2 seq-hdr ref-frame)
+        result-2 (tg/parse-frame-obu (nth frame-obus 1) seq-hdr {:decode-block-fn decode-block-fn-2})
+        tile-2 (first (:tiles (:tile-group result-2)))
+        luma-2 (:luma-plane (:final-tile-state tile-2))
+        leaf-2 (first (find-leaves tile-2))]
+    {:frame-header-1 (:frame-header result-1)
+     :frame-header-2 (:frame-header result-2)
+     :leaf-2 leaf-2
+     :luma-1 luma-1
+     :luma-2 luma-2}))
+
+(deftest inter-zeromv-bit-exact-test
+  (let [bytes (fixtures/inter-32x32-zeromv-bytes)
+        golden (golden-vec (fixtures/inter-32x32-zeromv-golden-yuv))
+        golden-1 (subvec golden 0 1024)
+        golden-2 (subvec golden 1024 2048)
+        {:keys [frame-header-1 frame-header-2 leaf-2 luma-1 luma-2]} (decode-inter-sequence bytes)]
+    (testing "frame 2 is a real INTER_FRAME within this repo's narrow
+              error_resilient_mode==1/enable_order_hint==0 inter scope"
+      (is (true? (:frame-is-intra frame-header-1)))
+      (is (false? (:frame-is-intra frame-header-2)))
+      (is (= fh/INTER_FRAME (:frame-type frame-header-2)))
+      (is (= 1 (:error-resilient-mode frame-header-2)))
+      (is (= fh/PRIMARY_REF_NONE (:primary-ref-frame frame-header-2)))
+      (is (= [0 0 0 0 0 0 0] (:ref-frame-idx frame-header-2)))
+      (is (= 0 (:is-motion-mode-switchable frame-header-2)))
+      (is (not= :switchable (:interpolation-filter frame-header-2)))
+      (is (every? #(= :identity %) (:gm-type frame-header-2))))
+    (testing "the real encoder's chosen inter mode -- confirmed by actually
+              decoding, not assumed -- is NEARESTMV with a genuinely
+              decoded (0,0) motion vector against LAST_FRAME, and skip=true
+              (zero residual, matching the byte-identical frame content) --
+              see av1.decode-block/read-inter-y-mode's docstring for why
+              NEARESTMV (not the originally-guessed GLOBALMV/NEWMV) is
+              legitimately in scope for this exact degenerate
+              find_mv_stack case"
+      (is (true? (get-in leaf-2 [:decode-block :is-inter])))
+      (is (= db/LAST_FRAME (get-in leaf-2 [:decode-block :ref-frame])))
+      (is (= db/NEARESTMV (get-in leaf-2 [:decode-block :y-mode])))
+      (is (= [0 0] (get-in leaf-2 [:decode-block :mv])))
+      (is (true? (get-in leaf-2 [:decode-block :skip]))))
+    (testing "both frames' reconstructed luma planes are bit-exact against
+              dav1d's independent decode of the same real bitstream (no
+              tolerance)"
+      (is (= 1024 (count luma-1)))
+      (is (= 1024 (count luma-2)))
+      (is (= golden-1 luma-1))
+      (is (= golden-2 luma-2))
+      (is (= luma-1 luma-2)
+          "the two frames' content is byte-identical by construction, and
+           motion compensation + zero residual should reproduce that
+           exactly"))))
+
+(deftest inter-zeromv-residual-bit-exact-test
+  (let [bytes (fixtures/inter-32x32-zeromv-residual-bytes)
+        golden (golden-vec (fixtures/inter-32x32-zeromv-residual-golden-yuv))
+        golden-1 (subvec golden 0 1024)
+        golden-2 (subvec golden 1024 2048)
+        {:keys [leaf-2 luma-1 luma-2]} (decode-inter-sequence bytes)]
+    (testing "same real-decoded NEARESTMV/LAST_FRAME/MV=(0,0) inter mode as
+              the zeromv fixture, but this time with a real, nonzero
+              residual (skip=false) -- exercises decode-transform-block's
+              inter-ref (predict_inter + coeffs()/dequantize/inverse-DCT/
+              reconstruct) path for the first time"
+      (is (true? (get-in leaf-2 [:decode-block :is-inter])))
+      (is (= db/LAST_FRAME (get-in leaf-2 [:decode-block :ref-frame])))
+      (is (= db/NEARESTMV (get-in leaf-2 [:decode-block :y-mode])))
+      (is (= [0 0] (get-in leaf-2 [:decode-block :mv])))
+      (is (false? (get-in leaf-2 [:decode-block :skip])))
+      (is (= 1024 (get-in leaf-2 [:decode-block :eob]))
+          "the checkerboard perturbation is maximally high-frequency -- every
+           coefficient position is nonzero")
+      (is (= :DCT_DCT (get-in leaf-2 [:decode-block :tx-type]))
+          "a REAL inter_tx_type cdf read (TX_SET_INTER_3, {IDTX,DCT_DCT})
+           decoded DCT_DCT, not IDTX"))
+    (testing "both frames' reconstructed luma planes are bit-exact against
+              dav1d's independent decode (no tolerance)"
+      (is (= golden-1 luma-1))
+      (is (= golden-2 luma-2)))))
+
 (deftest guard-frame-scope-throws-test
   (testing "make-decode-block-fn rejects out-of-scope frame headers instead
             of silently mis-parsing them (see av1.decode-block/guard-frame-scope!)"

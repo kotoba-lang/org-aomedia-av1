@@ -36,6 +36,19 @@
 (def SELECT_SCREEN_CONTENT_TOOLS 2)
 (def SELECT_INTEGER_MV 2)
 
+;; Ref-frame enum (07.bitstream.semantics.md's "RefFrame[0]" table, same
+;; order av1.frame-header's loop-filter-ref-deltas comment already uses):
+;; INTRA_FRAME=0 LAST_FRAME=1 LAST2_FRAME=2 LAST3_FRAME=3 GOLDEN_FRAME=4
+;; BWDREF_FRAME=5 ALTREF2_FRAME=6 ALTREF_FRAME=7. REFS_PER_FRAME=7 is the
+;; number of ref_frame_idx[] slots read in uncompressed_header() (spec
+;; #Uncompressed header syntax's `for (i = 0; i < REFS_PER_FRAME; i++)`
+;; loop) -- inter-frame extension (ADR-2607122000 Migration step 9
+;; continuation, "first inter-frame support").
+(def LAST_FRAME 1)
+(def ALTREF_FRAME 7)
+(def REFS_PER_FRAME 7)
+(def NUM_REF_FRAMES 8)
+
 (def SUPERRES_NUM 8)
 (def SUPERRES_DENOM_MIN 9)
 (def SUPERRES_DENOM_BITS 3)
@@ -490,26 +503,77 @@
 ;; #Frame reference mode syntax / #Skip mode params syntax / #Global motion
 ;; params syntax. All three read ZERO bits whenever FrameIsIntra == 1 (their
 ;; entire body is `if (FrameIsIntra) { <defaults, return> }` before any
-;; `@@`-marked syntax element) -- since Phase 0/1's `frame-is-intra?` is
-;; always true (inter frames throw earlier in `parse`), none of these are
-;; ever reached in this phase; kept as explicit no-op passthroughs (rather
-;; than inlined constants) so the correspondence to the spec's function
-;; names/scope stays visible and the throw-on-violation guard has somewhere
-;; to live if inter-frame support is added later.
-(defn- frame-reference-mode [frame-is-intra?]
-  (when-not frame-is-intra?
-    (throw (ex-info "frame_reference_mode(): !FrameIsIntra not supported (out of Phase 0/1 scope)" {})))
-  {:reference-select 0})
+;; `@@`-marked syntax element).
+;;
+;; Inter-frame extension (ADR-2607122000 Migration step 9 continuation,
+;; "first inter-frame support" -- zero-motion baseline, mirroring
+;; org-iso-h264's task #20 strategy): the !FrameIsIntra branches ARE now
+;; implemented, but only to the extent this repo's narrow single-leaf/
+;; single-ref/no-compound scope needs (see av1.decode-block's namespace
+;; docstring for the full scope). `frame_reference_mode()` reads a real
+;; `reference_select` bit unconditionally for inter frames (per spec, no
+;; further gating) -- this repo doesn't restrict its value (a block-level
+;; `comp_mode` read only happens when `reference_select && Min(bw4,bh4)>=2`,
+;; and av1.decode-block's read-ref-frames throws if it ever sees a
+;; comp_mode/compound reference, so an unsupported bitstream fails there,
+;; not here). `skip_mode_params()` needs the real skipModeAllowed
+;; derivation, but this repo requires `enable_order_hint == 0` (see `parse`'s
+;; inter-frame guard), which per spec's own `if (... || !enable_order_hint)
+;; skipModeAllowed = 0` forces skipModeAllowed=0 UNCONDITIONALLY regardless
+;; of reference_select or RefOrderHint state -- so no `forwardIdx`/
+;; `backwardIdx` search over ref_frame_idx/RefOrderHint is needed at all,
+;; and skip_mode_present is always 0 with zero bits read.
+(defn- parse-frame-reference-mode
+  "spec #Frame reference mode syntax."
+  [r frame-is-intra?]
+  (if frame-is-intra?
+    [{:reference-select 0} r]
+    (let [[reference-select r'] (br/f r 1)]
+      [{:reference-select reference-select} r'])))
 
-(defn- skip-mode-params [frame-is-intra?]
-  (when-not frame-is-intra?
-    (throw (ex-info "skip_mode_params(): !FrameIsIntra not supported (out of Phase 0/1 scope)" {})))
-  {:skip-mode-present 0})
+(defn- parse-skip-mode-params
+  "spec #Skip mode params syntax, restricted to this repo's
+   `enable_order_hint == 0` scope (see `parse`'s inter-frame guard): per
+   spec `if (FrameIsIntra || !reference_select || !enable_order_hint)
+   skipModeAllowed = 0`, so `!enable_order_hint` alone already forces
+   skipModeAllowed=0 for every inter frame this repo can reach -- the
+   forwardIdx/backwardIdx RefOrderHint search (spec's only path that can
+   make skipModeAllowed=1) is therefore unreachable here and not
+   implemented; throws rather than silently mis-parsing if that invariant
+   is ever violated."
+  [r frame-is-intra? enable-order-hint]
+  (when (and (not frame-is-intra?) (pos? enable-order-hint))
+    (throw (ex-info "skip_mode_params(): enable_order_hint != 0 not supported (needs the forwardIdx/backwardIdx RefOrderHint search, out of scope)"
+                     {:reason :unsupported-skip-mode-order-hint})))
+  ;; skipModeAllowed is always 0 in this repo's scope (FrameIsIntra, or
+  ;; !enable_order_hint per the guard above) -> skip_mode_present=0, no read.
+  [{:skip-mode-present 0} r])
 
-(defn- global-motion-params [frame-is-intra?]
-  (when-not frame-is-intra?
-    (throw (ex-info "global_motion_params(): !FrameIsIntra not supported (out of Phase 0/1 scope)" {})))
-  {:gm-type (vec (repeat 8 :identity))})
+(defn- parse-global-motion-params
+  "spec #Global motion params syntax, restricted to IDENTITY global motion
+   for every reference (this repo's zero-motion-baseline scope, see
+   av1.decode-block's namespace docstring's \"Find MV stack\" section --
+   GLOBALMV's predicted MV is only (0,0) when GmType is IDENTITY for the
+   referenced frame). Reads the real `is_global` bit for each of the
+   REFS_PER_FRAME=7 references (LAST_FRAME..ALTREF_FRAME) unconditionally
+   for inter frames (per spec, no further gating) -- throws rather than
+   silently mis-parsing (or mis-predicting a nonzero-MV GLOBALMV) if any
+   `is_global` is ever 1 (ROTZOOM/TRANSLATION/AFFINE global motion, which
+   would need `read_global_param()`'s subexp-coded deltas, not
+   transcribed here)."
+  [r frame-is-intra?]
+  (if frame-is-intra?
+    [{:gm-type (vec (repeat 8 :identity))} r]
+    (let [[gm-type r']
+          (loop [ref LAST_FRAME, r r, acc (vec (repeat 8 :identity))]
+            (if (> ref ALTREF_FRAME)
+              [acc r]
+              (let [[is-global rb] (br/f r 1)]
+                (when (pos? is-global)
+                  (throw (ex-info "global_motion_params(): is_global != 0 not supported (only IDENTITY global motion is implemented)"
+                                   {:reason :unsupported-global-motion :ref ref})))
+                (recur (inc ref) rb acc))))]
+      [{:gm-type gm-type} r'])))
 
 (defn- read-points-loop
   "Shared shape for film_grain_params()'s `point_*_value`/`point_*_scaling`
@@ -529,21 +593,32 @@
       (let [[v r'] (br/f r 8)] (recur (inc i) r' (conj acc v))))))
 
 (defn- parse-film-grain-params
-  "spec #Film grain params syntax. SCOPE: `update_grain` is unconditionally 1
-   here -- frame_type is always KEY_FRAME/INTRA_ONLY_FRAME in Phase 0/1 scope
-   (never INTER_FRAME, `parse` throws earlier otherwise), so the
-   update_grain==0 / film_grain_params_ref_idx / load_grain_params()
-   cross-frame-grain-state branch is structurally unreachable and not
-   implemented."
+  "spec #Film grain params syntax. SCOPE: when `frame_type ==
+   INTER_FRAME`, the real `update_grain` bit IS now read (inter-frame
+   extension, ADR-2607122000 Migration step 9 continuation) -- but if it
+   ever decodes to 0, `film_grain_params_ref_idx`/`load_grain_params()`
+   (cross-frame grain state) is NOT implemented and this throws rather than
+   silently mis-parsing. For every other frame_type, `update_grain` is
+   unconditionally 1 with no bit read (unchanged from before this
+   extension). None of this repo's fixtures enable film grain
+   (`film_grain_params_present=0`), so `apply_grain` is always 0 and this
+   whole function returns at the top before either branch matters in
+   practice -- implemented in full anyway rather than leaving the
+   INTER_FRAME case silently wrong."
   [r {:keys [film-grain-params-present show-frame showable-frame mono-chrome
-             subsampling-x subsampling-y]}]
+             subsampling-x subsampling-y frame-type]}]
   (if (or (zero? film-grain-params-present)
           (and (zero? show-frame) (zero? showable-frame)))
     [{:apply-grain 0} r]
     (let [[apply-grain r1] (br/f r 1)]
       (if (zero? apply-grain)
         [{:apply-grain 0} r1]
-        (let [[grain-seed r2] (br/f r1 16)
+        (let [[grain-seed r1c] (br/f r1 16)
+              [update-grain r2]
+              (if (= frame-type INTER_FRAME) (br/f r1c 1) [1 r1c])
+              _ (when (zero? update-grain)
+                  (throw (ex-info "film_grain_params(): update_grain == 0 not supported (needs load_grain_params() cross-frame grain state)"
+                                   {:reason :unsupported-load-grain-params})))
               [num-y-points r3] (br/f r2 4)
               [y-points r4] (read-points-loop r3 num-y-points)
               [chroma-scaling-from-luma r5]
@@ -603,6 +678,91 @@
             :overlap-flag overlap-flag :clip-to-restricted-range clip-to-restricted-range}
            r17])))))
 
+;; -- Inter-frame reference/size fields (ADR-2607122000 Migration step 9
+;; continuation, "first inter-frame support" -- zero-motion baseline) --
+;; spec #Uncompressed header syntax's `else` (!FrameIsIntra) branch from
+;; the ref_frame_idx loop through read_interpolation_filter()/
+;; is_motion_mode_switchable/use_ref_frame_mvs, plus #Interpolation filter
+;; syntax.
+
+(defn- read-interpolation-filter
+  "spec #Interpolation filter syntax."
+  [r]
+  (let [[is-filter-switchable r1] (br/f r 1)]
+    (if (= is-filter-switchable 1)
+      [{:interpolation-filter :switchable} r1]
+      (let [[interpolation-filter r2] (br/f r1 2)]
+        [{:interpolation-filter interpolation-filter} r2]))))
+
+(defn- parse-inter-refs-and-size
+  "The !FrameIsIntra branch of uncompressed_header() from the ref_frame_idx
+   loop through is_motion_mode_switchable/use_ref_frame_mvs (spec
+   #Uncompressed header syntax). Only reachable once `parse`'s inter-frame
+   guard has already confirmed `error_resilient_mode == 1` and
+   `enable_order_hint == 0` for this frame -- both are relied on here:
+
+     - `enable_order_hint == 0` forces `frame_refs_short_signaling = 0`
+       unconditionally (spec: `if (!enable_order_hint)
+       frame_refs_short_signaling = 0`), so every one of the
+       REFS_PER_FRAME=7 `ref_frame_idx[i]` slots is always read as a real
+       f(3) -- `set_frame_refs()`'s short-signaling derivation is never
+       needed and not implemented.
+
+     - `error_resilient_mode == 1` forces `frame_size_override_flag &&
+       !error_resilient_mode` to always be false, so `frame_size_with_refs()`
+       (which would need RefUpscaledWidth/RefFrameHeight cross-frame state
+       this repo doesn't track) is never reached -- throws rather than
+       silently mis-parsing if that invariant is ever violated -- and forces
+       `use_ref_frame_mvs = 0` with no bit read (spec: `if
+       (error_resilient_mode || !enable_ref_frame_mvs) use_ref_frame_mvs =
+       0`).
+
+   The OrderHints[]/RefFrameSignBias[] bookkeeping loop (spec's last `for`
+   in this branch) is pure bookkeeping for cross-frame compound/skip-mode
+   state this repo doesn't implement (`RefFrameSignBias` is always 0 when
+   `enable_order_hint == 0`, per spec) -- consumes no bits, so it's omitted
+   entirely rather than computed and discarded.
+
+   `frame_id_numbers_present_flag == 1`'s per-ref `delta_frame_id_minus_1`
+   IS read (real f(n) bits, n = delta_frame_id_length_minus_2 + 2) so bit
+   position stays correct -- but the resulting `expectedFrameId[i]` (spec:
+   only used for cross-frame reference-validity checking, `RefValid`/
+   `mark_ref_frames`, not for anything this repo's decode path needs) is
+   computed and then discarded, not tracked, since this repo doesn't
+   implement multi-frame RefValid bookkeeping."
+  [r seq-hdr error-resilient-mode force-integer-mv frame-size-override-flag]
+  (let [delta-frame-id-len (when (= (:frame-id-numbers-present-flag seq-hdr) 1)
+                              (+ (:delta-frame-id-length-minus-2 seq-hdr) 2))
+        [ref-frame-idx r1]
+        (loop [i 0, r r, acc []]
+          (if (>= i REFS_PER_FRAME)
+            [acc r]
+            (let [[idx r'] (br/f r 3)
+                  r'' (if delta-frame-id-len
+                        (let [[_delta-frame-id-minus-1 r'''] (br/f r' delta-frame-id-len)]
+                          r''')
+                        r')]
+              (recur (inc i) r'' (conj acc idx)))))
+        _ (when (and (= frame-size-override-flag 1) (not= error-resilient-mode 1))
+            (throw (ex-info "uncompressed_header(): frame_size_with_refs() not supported (needs RefUpscaledWidth/RefFrameHeight cross-frame state)"
+                             {:reason :unsupported-frame-size-with-refs})))
+        [frame-size-fields r2] (parse-frame-size r1 seq-hdr)
+        [render-size-fields r3] (parse-render-size r2 frame-size-fields)
+        [allow-high-precision-mv r4]
+        (if (= force-integer-mv 1) [0 r3] (br/f r3 1))
+        [interp r5] (read-interpolation-filter r4)
+        [is-motion-mode-switchable r6] (br/f r5 1)]
+    [{:ref-frame-idx ref-frame-idx
+      :frame-size-fields frame-size-fields
+      :render-size-fields render-size-fields
+      :allow-high-precision-mv allow-high-precision-mv
+      :interpolation-filter (:interpolation-filter interp)
+      :is-motion-mode-switchable is-motion-mode-switchable
+      ;; use_ref_frame_mvs forced 0 -- error_resilient_mode == 1 is
+      ;; guaranteed by `parse`'s guard before this fn is ever called.
+      :use-ref-frame-mvs 0}
+     r6]))
+
 (defn parse
   "Parse uncompressed_header() through quantization_params() for an intra
    frame (KEY_FRAME or INTRA_ONLY_FRAME). `reader` must be positioned at
@@ -661,9 +821,23 @@
                                (br/f rd 1))]
                 [0 ft sf sfable erm re]))))
         frame-is-intra? (or (= frame-type INTRA_ONLY_FRAME) (= frame-type KEY_FRAME))]
+    ;; Inter-frame extension (ADR-2607122000 Migration step 9 continuation,
+    ;; "first inter-frame support" -- zero-motion baseline): INTER_FRAME is
+    ;; now supported, but only within the narrow scope every simplification
+    ;; below (skip_mode_params/frame_refs_short_signaling/frame_size_with_refs/
+    ;; use_ref_frame_mvs/global_motion_params) depends on -- SWITCH_FRAME
+    ;; (needs frame_size_override_flag=1-forced handling this repo doesn't
+    ;; special-case) and any inter frame that isn't error_resilient_mode==1 /
+    ;; enable_order_hint==0 still throw, same as before this extension.
     (when-not frame-is-intra?
-      (throw (ex-info "inter frames (frame_type == INTER_FRAME) not supported (needs cross-frame reference-frame state, out of Phase 0 scope)"
-                       {:frame-type frame-type})))
+      (when (not= frame-type INTER_FRAME)
+        (throw (ex-info "SWITCH_FRAME not supported (out of scope)" {:frame-type frame-type})))
+      (when (not= error-resilient-mode 1)
+        (throw (ex-info "inter frames require error_resilient_mode == 1 in this repo's scope (needed to force primary_ref_frame=PRIMARY_REF_NONE, use_ref_frame_mvs=0, allow_warped_motion=0, and frame_size() over frame_size_with_refs())"
+                         {:reason :unsupported-inter-not-error-resilient})))
+      (when (not= enable-order-hint 0)
+        (throw (ex-info "inter frames require enable_order_hint == 0 in this repo's scope (needed to force frame_refs_short_signaling=0 and skipModeAllowed=0, and to keep RefFrameSignBias/OrderHints trivial)"
+                         {:reason :unsupported-inter-order-hint}))))
     (let [[disable-cdf-update r2] (br/f r1 1)
           [allow-screen-content-tools r3]
           (if (= seq-force-screen-content-tools SELECT_SCREEN_CONTENT_TOOLS)
@@ -675,8 +849,10 @@
               (br/f r3 1)
               [seq-force-integer-mv r3])
             [0 r3])
-          ;; FrameIsIntra forces force_integer_mv = 1 regardless of the above.
-          _force-integer-mv 1
+          ;; FrameIsIntra forces force_integer_mv = 1 regardless of the above
+          ;; (spec: `if (FrameIsIntra) force_integer_mv = 1`); for inter
+          ;; frames the real computed value stands (inter-frame extension).
+          _force-integer-mv (if frame-is-intra? 1 _force-integer-mv-raw)
           id-len (when (= frame-id-numbers-present-flag 1)
                    (+ (:additional-frame-id-length-minus-1 seq-hdr)
                       (:delta-frame-id-length-minus-2 seq-hdr)
@@ -733,13 +909,37 @@
             (loop [i 0, r r11]
               (if (>= i 8) r (let [[_v r'] (br/f r order-hint-bits)] (recur (inc i) r'))))
             r11)
-          [frame-size-fields r13] (parse-frame-size r12 seq-hdr)
-          [render-size-fields r14] (parse-render-size r13 frame-size-fields)
-          [allow-intrabc r15]
-          (if (and (= allow-screen-content-tools 1)
-                    (= (:upscaled-width frame-size-fields) (:frame-width frame-size-fields)))
-            (br/f r14 1)
-            [0 r14])
+          ;; spec: `if (FrameIsIntra) { frame_size(); render_size(); ... } else
+          ;; { <ref_frame_idx loop, frame size, interp filter, motion mode,
+          ;; use_ref_frame_mvs> }` -- inter-frame extension (ADR-2607122000
+          ;; Migration step 9 continuation). `allow_intrabc`/`ref-frame-idx`/
+          ;; `allow-high-precision-mv`/`interpolation-filter`/
+          ;; `is-motion-mode-switchable`/`use-ref-frame-mvs` are all inside
+          ;; this same spec-level if/else (allow_intrabc only exists on the
+          ;; FrameIsIntra side; the other five only exist on the inter side --
+          ;; `allow_intrabc = 0` and the other five are simply absent/nil for
+          ;; intra frames, matching each field's spec-level initialization
+          ;; before this branch, e.g. `allow_intrabc = 0` at the top of
+          ;; uncompressed_header()).
+          [frame-size-fields render-size-fields allow-intrabc
+           ref-frame-idx allow-high-precision-mv interpolation-filter
+           is-motion-mode-switchable use-ref-frame-mvs r15]
+          (if frame-is-intra?
+            (let [[fsf r13] (parse-frame-size r12 seq-hdr)
+                  [rsf r14] (parse-render-size r13 fsf)
+                  [aib r15']
+                  (if (and (= allow-screen-content-tools 1)
+                           (= (:upscaled-width fsf) (:frame-width fsf)))
+                    (br/f r14 1)
+                    [0 r14])]
+              [fsf rsf aib nil nil nil nil nil r15'])
+            (let [[inter-fields r15']
+                  (parse-inter-refs-and-size r12 seq-hdr error-resilient-mode
+                                              _force-integer-mv frame-size-override-flag)]
+              [(:frame-size-fields inter-fields) (:render-size-fields inter-fields) 0
+               (:ref-frame-idx inter-fields) (:allow-high-precision-mv inter-fields)
+               (:interpolation-filter inter-fields) (:is-motion-mode-switchable inter-fields)
+               (:use-ref-frame-mvs inter-fields) r15']))
           [disable-frame-end-update-cdf r16]
           (if (or (= reduced-still-picture-header 1) (= disable-cdf-update 1))
             [1 r15]
@@ -766,21 +966,28 @@
                                          :subsampling-y (:subsampling-y seq-hdr)
                                          :num-planes (:num-planes seq-hdr)})
           [tx-mode r25] (read-tx-mode r24 (:coded-lossless lossless))
-          reference-mode (frame-reference-mode frame-is-intra?)
-          skip-mode (skip-mode-params frame-is-intra?)
+          [reference-mode r25b] (parse-frame-reference-mode r25 frame-is-intra?)
+          [skip-mode r25c] (parse-skip-mode-params r25b frame-is-intra? enable-order-hint)
           ;; spec: `if (FrameIsIntra || error_resilient_mode || !enable_warped_motion)
           ;; allow_warped_motion = 0 else @@allow_warped_motion f(1)` --
-          ;; FrameIsIntra is always true in this phase's scope, so this is
-          ;; always 0 with no bit read.
-          allow-warped-motion 0
-          [reduced-tx-set r26] (br/f r25 1)
-          global-motion (global-motion-params frame-is-intra?)
-          [film-grain r27] (parse-film-grain-params r26 {:film-grain-params-present (:film-grain-params-present seq-hdr)
+          ;; error_resilient_mode == 1 is guaranteed for every inter frame
+          ;; this repo reaches (see `parse`'s inter-frame guard), so this is
+          ;; always 0 with no bit read regardless of frame-is-intra?/
+          ;; enable_warped_motion (implemented generically anyway, matching
+          ;; the spec condition exactly, in case that guard is ever relaxed).
+          [allow-warped-motion r25d]
+          (if (or frame-is-intra? (= error-resilient-mode 1) (zero? (:enable-warped-motion seq-hdr)))
+            [0 r25c]
+            (br/f r25c 1))
+          [reduced-tx-set r26] (br/f r25d 1)
+          [global-motion r26b] (parse-global-motion-params r26 frame-is-intra?)
+          [film-grain r27] (parse-film-grain-params r26b {:film-grain-params-present (:film-grain-params-present seq-hdr)
                                                           :show-frame show-frame
                                                           :showable-frame showable-frame
                                                           :mono-chrome (:mono-chrome seq-hdr)
                                                           :subsampling-x (:subsampling-x seq-hdr)
-                                                          :subsampling-y (:subsampling-y seq-hdr)})]
+                                                          :subsampling-y (:subsampling-y seq-hdr)
+                                                          :frame-type frame-type})]
       {:show-existing-frame show-existing-frame
        :frame-type frame-type
        :frame-is-intra frame-is-intra?
@@ -796,6 +1003,14 @@
        :primary-ref-frame primary-ref-frame
        :refresh-frame-flags refresh-frame-flags
        :allow-intrabc allow-intrabc
+       ;; Inter-frame extension fields (ADR-2607122000 Migration step 9
+       ;; continuation) -- nil for intra frames (spec-level fields that
+       ;; simply don't exist on the FrameIsIntra side of the branch).
+       :ref-frame-idx ref-frame-idx
+       :allow-high-precision-mv allow-high-precision-mv
+       :interpolation-filter interpolation-filter
+       :is-motion-mode-switchable is-motion-mode-switchable
+       :use-ref-frame-mvs use-ref-frame-mvs
        :disable-frame-end-update-cdf disable-frame-end-update-cdf
        :frame-width (:frame-width frame-size-fields)
        :frame-height (:frame-height frame-size-fields)
