@@ -123,6 +123,121 @@
       (is (= 1024 (count luma-plane)))
       (is (= golden luma-plane)))))
 
+(defn- decode-all-planes
+  "Like `decode-luma-plane` but also returns the U/V plane buffers (for the
+   color chroma-decode fixtures below, which are 4:2:0 -- num_planes=3)."
+  [bytes]
+  (let [seq-obu (find-obu bytes :obu-sequence-header)
+        seq-hdr (sh/parse (:reader-at-payload seq-obu))
+        frame-obu (find-obu bytes :obu-frame)
+        frame-hdr0 (fh/parse (:reader-at-payload frame-obu) seq-hdr)
+        decode-block-fn (db/make-decode-block-fn frame-hdr0 seq-hdr)
+        result (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn})
+        tile (first (:tiles (:tile-group result)))
+        find-leaf (fn find-leaf [node]
+                    (if (:leaf node)
+                      node
+                      (when (:children node) (some find-leaf (:children node)))))
+        leaf (some find-leaf (:superblock-partitions tile))]
+    {:frame-header (:frame-header result)
+     :leaf leaf
+     :luma-plane (:luma-plane (:final-tile-state tile))
+     :u-plane (:u-plane (:final-tile-state tile))
+     :v-plane (:v-plane (:final-tile-state tile))}))
+
+(deftest color-32x32-bit-exact-test
+  (let [bytes (fixtures/keyframe-32x32-color-bytes)
+        golden (golden-vec (fixtures/keyframe-32x32-color-golden-yuv))
+        golden-y (subvec golden 0 1024)
+        golden-u (subvec golden 1024 1280)
+        golden-v (subvec golden 1280 1536)
+        {:keys [frame-header leaf luma-plane u-plane v-plane]} (decode-all-planes bytes)]
+    (testing "frame geometry: 32x32, single superblock, 4:2:0 (num_planes=3)"
+      (is (= 32 (:frame-width frame-header)))
+      (is (= 32 (:frame-height frame-header)))
+      (is (= 3 (:num-planes frame-header))))
+    (testing "the encoder's disabled-everything-but-DC/UV_DC/NONE/TX_32X32
+              flags (see test/av1/fixtures.clj docstring, notably
+              --enable-cfl-intra=0) actually produced exactly the single-
+              leaf/BLOCK_32X32/PARTITION_NONE/DC_PRED/UV_DC_PRED shape this
+              namespace supports"
+      (is (= tg/BLOCK_32X32 (:b-size leaf)))
+      (is (= tg/PARTITION_NONE (:partition leaf)))
+      (is (= 3 (get-in leaf [:decode-block :tx-size])) "TX_32X32 (luma)")
+      (is (false? (get-in leaf [:decode-block :skip])))
+      (is (= db/DC_PRED (get-in leaf [:decode-block :y-mode])))
+      (is (= db/UV_DC_PRED (get-in leaf [:decode-block :uv-mode])))
+      (is (= 16 (get-in leaf [:decode-block :eob])) "luma eob")
+      (is (= 7 (get-in leaf [:decode-block :u-eob])) "U (Cb) eob")
+      (is (= 10 (get-in leaf [:decode-block :v-eob])) "V (Cr) eob"))
+    (testing "reconstructed luma AND chroma (Cb/Cr) planes are bit-exact
+              against dav1d's independent decode of the same real encoded
+              bitstream (no tolerance) -- the primary chroma-decode
+              regression test"
+      (is (= 1024 (count luma-plane)))
+      (is (= 256 (count u-plane)))
+      (is (= 256 (count v-plane)))
+      (is (= golden-y luma-plane) "luma plane bit-exact")
+      (is (= golden-u u-plane) "Cb plane bit-exact")
+      (is (= golden-v v-plane) "Cr plane bit-exact"))))
+
+(deftest color-busy-32x32-bit-exact-test
+  (let [bytes (fixtures/keyframe-32x32-color-busy-bytes)
+        golden (golden-vec (fixtures/keyframe-32x32-color-busy-golden-yuv))
+        golden-y (subvec golden 0 1024)
+        golden-u (subvec golden 1024 1280)
+        golden-v (subvec golden 1280 1536)
+        {:keys [frame-header leaf luma-plane u-plane v-plane]} (decode-all-planes bytes)]
+    (testing "frame geometry: 32x32, single superblock, 4:2:0"
+      (is (= 32 (:frame-width frame-header)))
+      (is (= 32 (:frame-height frame-header)))
+      (is (= 3 (:num-planes frame-header))))
+    (testing "same validated shape as keyframe-32x32-color, but with far more
+              nonzero coefficients on every plane (eob=190/66/105 vs.
+              16/7/10) -- exercises much more of get-coeff-base-ctx/
+              get-coeff-br-ctx (including the coeff_br/golomb continuation
+              paths) and per-context CDF adaptation for the chroma planes,
+              with the U and V planes' SHARED coefficient-cdf adaptation
+              state (see av1.decode-block namespace docstring) actually
+              exercised across many symbol reads instead of just a
+              few"
+      (is (= tg/BLOCK_32X32 (:b-size leaf)))
+      (is (= tg/PARTITION_NONE (:partition leaf)))
+      (is (= db/DC_PRED (get-in leaf [:decode-block :y-mode])))
+      (is (= db/UV_DC_PRED (get-in leaf [:decode-block :uv-mode])))
+      (is (= 190 (get-in leaf [:decode-block :eob])))
+      (is (= 66 (get-in leaf [:decode-block :u-eob])))
+      (is (= 105 (get-in leaf [:decode-block :v-eob]))))
+    (testing "reconstructed luma AND chroma planes are bit-exact against
+              dav1d's independent decode (no tolerance)"
+      (is (= golden-y luma-plane))
+      (is (= golden-u u-plane))
+      (is (= golden-v v-plane)))))
+
+(deftest multi-leaf-color-throws-test
+  (testing "chroma decode is only validated for a single whole-frame leaf
+            (see av1.decode-block namespace docstring's cross-block-context
+            section) -- decoding a real MULTI-leaf color bitstream throws
+            ex-info at the second leaf rather than silently mis-decoding
+            (uses keyframe-32x32-color's frame-header/seq-header shape but
+            simulates a second leaf by calling decode-block-fn directly
+            with avail-u?/avail-l? both true, the same signal a real
+            multi-leaf tile would pass)"
+    (let [bytes (fixtures/keyframe-32x32-color-bytes)
+          seq-obu (find-obu bytes :obu-sequence-header)
+          seq-hdr (sh/parse (:reader-at-payload seq-obu))
+          frame-obu (find-obu bytes :obu-frame)
+          frame-hdr (fh/parse (:reader-at-payload frame-obu) seq-hdr)
+          decode-block-fn (db/make-decode-block-fn frame-hdr seq-hdr)
+          result (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn})
+          tile (first (:tiles (:tile-group result)))
+          tile-state (:final-tile-state tile)]
+      (try
+        (decode-block-fn (assoc tile-state :bd nil) 0 0 tg/BLOCK_32X32 true true)
+        (is false "expected ex-info to be thrown, but decode-block-fn completed without throwing")
+        (catch clojure.lang.ExceptionInfo e
+          (is (= :unsupported-multi-leaf-chroma (:reason (ex-data e)))))))))
+
 (defn- find-leaves
   "Collects every `:leaf` node from a tile's superblock-partitions tree, in
    raster/z-order (matches decode_partition()'s real traversal order)."
@@ -282,9 +397,18 @@
       (testing "coded_lossless=1 is rejected (lossless uses the WHT, not DCT_DCT)"
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"CodedLossless"
                                (db/make-decode-block-fn (assoc frame-hdr :coded-lossless 1) seq-hdr))))
-      (testing "non-monochrome (num_planes>1) is rejected (luma-only phase)"
+      (testing "non-monochrome with an unsupported chroma format (num_planes>1
+                but not 4:2:0) is rejected -- monochrome (mono_chrome=1) and
+                4:2:0 color (mono_chrome=0, num_planes=3, subsampling_x=1,
+                subsampling_y=1) are both supported, see av1.decode-block
+                namespace docstring's chroma section"
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mono_chrome"
-                               (db/make-decode-block-fn frame-hdr (assoc seq-hdr :mono-chrome 0)))))
+                               (db/make-decode-block-fn frame-hdr (assoc seq-hdr :mono-chrome 0 :num-planes 3
+                                                                          :subsampling-x 0 :subsampling-y 0)))
+            "4:4:4 (subsampling 0,0) is rejected -- only 4:2:0 chroma is supported")
+        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mono_chrome"
+                               (db/make-decode-block-fn (assoc frame-hdr :num-planes 2) (assoc seq-hdr :mono-chrome 0 :subsampling-x 1 :subsampling-y 1)))
+            "num_planes=2 (not 1 or 3) is rejected"))
       (testing "tx_mode other than TX_MODE_LARGEST is rejected (no tx_depth CDF support)"
         (is (thrown-with-msg? clojure.lang.ExceptionInfo #"tx_mode"
                                (db/make-decode-block-fn (assoc frame-hdr :tx-mode :tx-mode-select) seq-hdr)))))))
