@@ -1,0 +1,134 @@
+(ns av1.bool-decoder
+  "AV1 'Symbol decoder' -- the daala-derived non-binary arithmetic coder from
+   AV1 Bitstream & Decoding Process Specification section 8.2 (\"Parsing
+   process for symbol decoder\"). This is a wholly different entropy coder
+   from H.264's CAVLC/CABAC (kotoba-lang/org-iso-h264 `h264.cavlc`) -- new
+   implementation, transcribed field-for-field from the spec pseudocode.
+   Source: https://github.com/AOMediaCodec/av1-spec master,
+   09.parsing.process.md \"Parsing process for symbol decoder\" (fetched
+   2026-07-12).
+
+   Scope (Phase 0, ADR-2607122000 Migration step 9): only the symbol-decoder
+   *primitives* (init_symbol / read_bool / read_literal / read_symbol with
+   CDF adaptation) are implemented here. The ~60 CDF tables the real decoder
+   initializes per spec section 9.2 (Default_Intra_Frame_Y_Mode_Cdf etc.) and
+   all higher-level syntax that reads coefficients/modes through those tables
+   are NOT implemented -- that belongs to the pixel-reconstruction phase
+   (tile_group_obu / decode_partition / decode_block), explicitly out of
+   scope here. This module is verified against hand-derived bit vectors
+   (see test/av1/bool_decoder_test.clj) rather than a real encoded tile,
+   because producing a real tile requires the full decode pipeline this
+   phase intentionally does not build yet."
+  (:require [av1.bitreader :as br]))
+
+(def EC_PROB_SHIFT 6)
+(def EC_MIN_PROB 4)
+
+(defn init-symbol
+  "spec 8.2.2 init_symbol(sz): initializes the Symbol decoder to read `sz`
+   bytes starting at the (byte-aligned) current bit-reader position.
+   Returns a bool-decoder state map (does NOT mutate/consume the bitreader
+   argument's carrier -- the returned state carries its own `:reader`)."
+  [reader sz]
+  (let [num-bits (min (* sz 8) 15)
+        [buf reader'] (br/f reader num-bits)
+        padded-buf (bit-shift-left buf (- 15 num-bits))
+        symbol-value (bit-xor (dec (bit-shift-left 1 15)) padded-buf)
+        symbol-range (bit-shift-left 1 15)
+        symbol-max-bits (- (* 8 sz) 15)]
+    {:reader reader'
+     :symbol-value symbol-value
+     :symbol-range symbol-range
+     :symbol-max-bits symbol-max-bits}))
+
+(defn read-symbol
+  "spec 8.2.4 (\"Symbol decoding process\"): decode one symbol against CDF
+   `cdf` (a vector of N+1 ints; cdf[N-1] == 1<<15; cdf[N] is the adaptation
+   counter). Returns [symbol cdf' state'] -- `cdf'` is the (possibly
+   adapted) cdf vector, per spec disable_cdf_update semantics the caller can
+   choose to discard it when disable_cdf_update==1 (adaptation is skipped
+   entirely below when `adapt?` is false, matching the spec note that
+   implementations may skip the update whose result is never used)."
+  ([state cdf] (read-symbol state cdf true))
+  ([state cdf adapt?]
+   (let [{:keys [symbol-range symbol-value symbol-max-bits reader]} state
+         n (dec (count cdf))
+         ;; cur/prev/symbol search loop, spec 8.2.4
+         [cur' prev' sym']
+         (loop [cur symbol-range, symbol -1]
+           (let [symbol (inc symbol)
+                 prev cur
+                 f-val (- (bit-shift-left 1 15) (nth cdf symbol))
+                 cur (+ (bit-shift-right
+                         (* (bit-shift-right symbol-range 8)
+                            (bit-shift-right f-val EC_PROB_SHIFT))
+                         (- 7 EC_PROB_SHIFT))
+                        (* EC_MIN_PROB (- n symbol 1)))]
+             (if (< symbol-value cur)
+               (recur cur symbol)
+               [cur prev symbol])))
+         new-range (- prev' cur')
+         new-value (- symbol-value cur')
+         ;; renormalization, spec 8.2.4 steps 1-7
+         bits (- 15 (br/floor-log2 new-range))
+         range-shifted (bit-shift-left new-range bits)
+         num-bits (min bits (max 0 symbol-max-bits))
+         [new-data reader'] (br/f reader num-bits)
+         padded-data (bit-shift-left new-data (- bits num-bits))
+         value-renorm (bit-xor padded-data
+                                (dec (bit-shift-left (inc new-value) bits)))
+         max-bits' (- symbol-max-bits bits)
+         ;; CDF adaptation, spec 8.2.4 (skipped when adapt? is false, i.e.
+         ;; disable_cdf_update == 1)
+         cdf' (if adapt?
+                (let [count-val (nth cdf n)
+                      rate (+ 3
+                              (if (> count-val 15) 1 0)
+                              (if (> count-val 31) 1 0)
+                              (min (br/floor-log2 n) 2))
+                      updated (loop [i 0, tmp 0, acc (transient cdf)]
+                                (if (>= i (dec n))
+                                  acc
+                                  (let [tmp' (if (= i sym') (bit-shift-left 1 15) tmp)
+                                        ci (nth cdf i)
+                                        ci' (if (< tmp' ci)
+                                              (- ci (bit-shift-right (- ci tmp') rate))
+                                              (+ ci (bit-shift-right (- tmp' ci) rate)))]
+                                    (recur (inc i) tmp' (assoc! acc i ci')))))
+                      updated' (assoc! updated n (+ count-val (if (< count-val 32) 1 0)))]
+                  (persistent! updated'))
+                cdf)]
+     [sym' cdf' {:reader reader'
+                 :symbol-range range-shifted
+                 :symbol-value value-renorm
+                 :symbol-max-bits max-bits'}])))
+
+(defn read-bool
+  "spec 8.2.3 (\"Boolean decoding process\"): decode a pseudo-raw bit with
+   equal 0/1 probability, via a throwaway cdf = [1<<14, 1<<15, 0] fed to
+   read_symbol (adaptation result is discarded -- spec note: the modified
+   cdf is never reused). Returns [bit state']."
+  [state]
+  (let [cdf [(bit-shift-left 1 14) (bit-shift-left 1 15) 0]
+        [sym _ state'] (read-symbol state cdf false)]
+    [sym state']))
+
+(defn read-literal
+  "spec 8.2.5 read_literal(n): n independent read_bool() calls, MSB first."
+  [state n]
+  (loop [x 0, i 0, s state]
+    (if (>= i n)
+      [x s]
+      (let [[b s'] (read-bool s)]
+        (recur (+ (* 2 x) b) (inc i) s')))))
+
+(defn exit-symbol
+  "spec 8.2.6 exit_symbol(): advances the underlying bit-reader past any
+   trailing bits not yet consumed by symbol decode (Max(0,SymbolMaxBits)
+   bits), leaving the reader byte-aligned at the end of the coded payload.
+   Returns the reader' (not the full bool-decoder state)."
+  [state]
+  (let [{:keys [reader symbol-max-bits]} state
+        skip (max 0 symbol-max-bits)
+        [_ reader'] (br/f reader skip)]
+    reader'))

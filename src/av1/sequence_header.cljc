@@ -1,0 +1,301 @@
+(ns av1.sequence-header
+  "sequence_header_obu() -- AV1 spec section 6.4 (\"Sequence header OBU
+   semantics\"), syntax transcribed from 06.bitstream.syntax.md
+   #General sequence header OBU syntax / #Color config syntax /
+   #Timing info syntax / #Decoder model info syntax /
+   #Operating parameters info syntax (AOMediaCodec/av1-spec master,
+   fetched 2026-07-12). Field order below matches the syntax table
+   exactly -- bitstream position depends on evaluating every conditional
+   in the same order the spec does, since this is a serial bit reader."
+  (:require [av1.bitreader :as br]))
+
+(def SELECT_SCREEN_CONTENT_TOOLS 2)
+(def SELECT_INTEGER_MV 2)
+
+;; Color config enum values, spec 6.4.2.
+(def CP_BT_709 1)
+(def CP_UNSPECIFIED 2)
+(def TC_SRGB 13)
+(def TC_UNSPECIFIED 2)
+(def MC_IDENTITY 0)
+(def MC_UNSPECIFIED 2)
+(def CSP_UNKNOWN 0)
+
+(defn- parse-timing-info
+  "spec #Timing info syntax."
+  [r]
+  (let [[num-units-in-display-tick r1] (br/f r 32)
+        [time-scale r2] (br/f r1 32)
+        [equal-picture-interval r3] (br/f r2 1)
+        [num-ticks-per-picture-minus-1 r4]
+        (if (= equal-picture-interval 1) (br/uvlc r3) [nil r3])]
+    [{:num-units-in-display-tick num-units-in-display-tick
+      :time-scale time-scale
+      :equal-picture-interval equal-picture-interval
+      :num-ticks-per-picture-minus-1 num-ticks-per-picture-minus-1}
+     r4]))
+
+(defn- parse-decoder-model-info
+  "spec #Decoder model info syntax."
+  [r]
+  (let [[buffer-delay-length-minus-1 r1] (br/f r 5)
+        [num-units-in-decoding-tick r2] (br/f r1 32)
+        [buffer-removal-time-length-minus-1 r3] (br/f r2 5)
+        [frame-presentation-time-length-minus-1 r4] (br/f r3 5)]
+    [{:buffer-delay-length-minus-1 buffer-delay-length-minus-1
+      :num-units-in-decoding-tick num-units-in-decoding-tick
+      :buffer-removal-time-length-minus-1 buffer-removal-time-length-minus-1
+      :frame-presentation-time-length-minus-1 frame-presentation-time-length-minus-1}
+     r4]))
+
+(defn- parse-operating-parameters-info
+  "spec #Operating parameters info syntax. `buffer-delay-length` = n."
+  [r buffer-delay-length]
+  (let [[decoder-buffer-delay r1] (br/f r buffer-delay-length)
+        [encoder-buffer-delay r2] (br/f r1 buffer-delay-length)
+        [low-delay-mode-flag r3] (br/f r2 1)]
+    [{:decoder-buffer-delay decoder-buffer-delay
+      :encoder-buffer-delay encoder-buffer-delay
+      :low-delay-mode-flag low-delay-mode-flag}
+     r3]))
+
+(defn- parse-color-config
+  "spec #Color config syntax. `seq-profile` is needed for bit-depth/chroma
+   derivation."
+  [r seq-profile]
+  (let [[high-bitdepth r1] (br/f r 1)
+        [bit-depth twelve-bit r2]
+        (cond
+          (and (= seq-profile 2) (= high-bitdepth 1))
+          (let [[tb r'] (br/f r1 1)] [(if (= tb 1) 12 10) tb r'])
+          (<= seq-profile 2) [(if (= high-bitdepth 1) 10 8) nil r1]
+          :else [nil nil r1])
+        [mono-chrome r3] (if (= seq-profile 1) [0 r2] (br/f r2 1))
+        num-planes (if (= mono-chrome 1) 1 3)
+        [color-description-present-flag r4] (br/f r3 1)
+        [color-primaries transfer-characteristics matrix-coefficients r5]
+        (if (= color-description-present-flag 1)
+          (let [[cp r'] (br/f r4 8)
+                [tc r''] (br/f r' 8)
+                [mc r'''] (br/f r'' 8)]
+            [cp tc mc r'''])
+          [CP_UNSPECIFIED TC_UNSPECIFIED MC_UNSPECIFIED r4])]
+    (if (= mono-chrome 1)
+      (let [[color-range r6] (br/f r5 1)]
+        [{:high-bitdepth high-bitdepth :twelve-bit twelve-bit :bit-depth bit-depth
+          :mono-chrome mono-chrome :num-planes num-planes
+          :color-description-present-flag color-description-present-flag
+          :color-primaries color-primaries
+          :transfer-characteristics transfer-characteristics
+          :matrix-coefficients matrix-coefficients
+          :color-range color-range
+          :subsampling-x 1 :subsampling-y 1
+          :chroma-sample-position CSP_UNKNOWN :separate-uv-delta-q 0}
+         r6])
+      (let [identity-srgb? (and (= color-primaries CP_BT_709)
+                                 (= transfer-characteristics TC_SRGB)
+                                 (= matrix-coefficients MC_IDENTITY))
+            [color-range subsampling-x subsampling-y r6]
+            (if identity-srgb?
+              [1 0 0 r5]
+              (let [[cr r'] (br/f r5 1)]
+                (cond
+                  (= seq-profile 0) [cr 1 1 r']
+                  (= seq-profile 1) [cr 0 0 r']
+                  :else
+                  (if (= bit-depth 12)
+                    (let [[sx r''] (br/f r' 1)]
+                      (if (= sx 1)
+                        (let [[sy r'''] (br/f r'' 1)] [cr sx sy r'''])
+                        [cr sx 0 r'']))
+                    [cr 1 0 r']))))
+            [chroma-sample-position r7]
+            (if (and (= subsampling-x 1) (= subsampling-y 1))
+              (br/f r6 2)
+              [CSP_UNKNOWN r6])
+            [separate-uv-delta-q r8] (br/f r7 1)]
+        [{:high-bitdepth high-bitdepth :twelve-bit twelve-bit :bit-depth bit-depth
+          :mono-chrome mono-chrome :num-planes num-planes
+          :color-description-present-flag color-description-present-flag
+          :color-primaries color-primaries
+          :transfer-characteristics transfer-characteristics
+          :matrix-coefficients matrix-coefficients
+          :color-range color-range
+          :subsampling-x subsampling-x :subsampling-y subsampling-y
+          :chroma-sample-position chroma-sample-position
+          :separate-uv-delta-q separate-uv-delta-q}
+         r8]))))
+
+(declare parse-post-operating-points parse-post-operating-points-general)
+
+(defn parse
+  "spec #General sequence header OBU syntax. `reader` must be positioned at
+   the start of the sequence_header_obu() payload (byte-aligned per OBU
+   framing). Returns a map of all decoded fields -- field names mirror the
+   spec's syntax-element names (kebab-cased)."
+  [reader]
+  (let [[seq-profile r1] (br/f reader 3)
+        [still-picture r2] (br/f r1 1)
+        [reduced-still-picture-header r3] (br/f r2 1)]
+    (if (= reduced-still-picture-header 1)
+      (let [[seq-level-idx-0 r4] (br/f r3 5)
+            base {:seq-profile seq-profile
+                  :still-picture still-picture
+                  :reduced-still-picture-header reduced-still-picture-header
+                  :timing-info-present-flag 0
+                  :decoder-model-info-present-flag 0
+                  :initial-display-delay-present-flag 0
+                  :operating-points-cnt-minus-1 0
+                  :operating-point-idc [0]
+                  :seq-level-idx [seq-level-idx-0]
+                  :seq-tier [0]
+                  :decoder-model-present-for-this-op [0]
+                  :frame-id-numbers-present-flag 0}]
+        (parse-post-operating-points r4 base))
+      (let [[timing-info-present-flag r4] (br/f r3 1)
+            [timing-info r5] (if (= timing-info-present-flag 1) (parse-timing-info r4) [nil r4])
+            [decoder-model-info-present-flag r6]
+            (if (= timing-info-present-flag 1) (br/f r5 1) [0 r5])
+            [decoder-model-info r7]
+            (if (= decoder-model-info-present-flag 1) (parse-decoder-model-info r6) [nil r6])
+            [initial-display-delay-present-flag r8] (br/f r7 1)
+            [operating-points-cnt-minus-1 r9] (br/f r8 5)
+            n-ops (inc operating-points-cnt-minus-1)
+            buffer-delay-length (when decoder-model-info
+                                   (inc (:buffer-delay-length-minus-1 decoder-model-info)))
+            [ops r10]
+            (loop [i 0, r r9, acc []]
+              (if (>= i n-ops)
+                [acc r]
+                (let [[op-idc r'] (br/f r 12)
+                      [level-idx r''] (br/f r' 5)
+                      [tier r'''] (if (> level-idx 7) (br/f r'' 1) [0 r''])
+                      [decoder-model-present-for-op r'''']
+                      (if (= decoder-model-info-present-flag 1) (br/f r''' 1) [0 r'''])
+                      [op-params r5*]
+                      (if (= decoder-model-present-for-op 1)
+                        (parse-operating-parameters-info r'''' buffer-delay-length)
+                        [nil r''''])
+                      [_idd-present r6*]
+                      (if (= initial-display-delay-present-flag 1) (br/f r5* 1) [0 r5*])
+                      [_idd-minus-1 r7*]
+                      (if (and (= initial-display-delay-present-flag 1) (= _idd-present 1))
+                        (br/f r6* 4)
+                        [nil r6*])]
+                  (recur (inc i) r7*
+                         (conj acc {:operating-point-idc op-idc
+                                    :seq-level-idx level-idx
+                                    :seq-tier tier
+                                    :decoder-model-present-for-this-op decoder-model-present-for-op
+                                    :operating-parameters-info op-params
+                                    :initial-display-delay-present-for-this-op _idd-present
+                                    :initial-display-delay-minus-1 _idd-minus-1})))))
+            base {:seq-profile seq-profile
+                  :still-picture still-picture
+                  :reduced-still-picture-header reduced-still-picture-header
+                  :timing-info-present-flag timing-info-present-flag
+                  :timing-info timing-info
+                  :decoder-model-info-present-flag decoder-model-info-present-flag
+                  :decoder-model-info decoder-model-info
+                  :initial-display-delay-present-flag initial-display-delay-present-flag
+                  :operating-points-cnt-minus-1 operating-points-cnt-minus-1
+                  :operating-points ops
+                  :operating-point-idc (mapv :operating-point-idc ops)
+                  :frame-id-numbers-present-flag nil}]
+        (parse-post-operating-points-general r10 base)))))
+
+(defn- parse-common-tail
+  "The part of sequence_header_obu() after operating points are resolved,
+   common to both the reduced-still-picture-header and general paths:
+   frame_width_bits_minus_1 .. film_grain_params_present."
+  [r base]
+  (let [;; operatingPoint = choose_operating_point() is implementation
+        ;; defined (spec leaves choice to decoder policy) and doesn't
+        ;; consume bits; OperatingPointIdc isn't needed for Phase 0 (no
+        ;; scalability/OBU dropping performed here).
+        [frame-width-bits-minus-1 r1] (br/f r 4)
+        [frame-height-bits-minus-1 r2] (br/f r1 4)
+        [max-frame-width-minus-1 r3] (br/f r2 (inc frame-width-bits-minus-1))
+        [max-frame-height-minus-1 r4] (br/f r3 (inc frame-height-bits-minus-1))
+        [frame-id-numbers-present-flag r5]
+        (if (= (:reduced-still-picture-header base) 1)
+          [0 r4]
+          (br/f r4 1))
+        [delta-frame-id-length-minus-2 additional-frame-id-length-minus-1 r6]
+        (if (= frame-id-numbers-present-flag 1)
+          (let [[d r'] (br/f r5 4)
+                [a r''] (br/f r' 3)]
+            [d a r''])
+          [nil nil r5])
+        [use-128x128-superblock r7] (br/f r6 1)
+        [enable-filter-intra r8] (br/f r7 1)
+        [enable-intra-edge-filter r9] (br/f r8 1)
+        [enable-interintra-compound enable-masked-compound enable-warped-motion
+         enable-dual-filter enable-order-hint enable-jnt-comp enable-ref-frame-mvs
+         seq-force-screen-content-tools seq-force-integer-mv order-hint-bits r10]
+        (if (= (:reduced-still-picture-header base) 1)
+          [0 0 0 0 0 0 0 SELECT_SCREEN_CONTENT_TOOLS SELECT_INTEGER_MV 0 r9]
+          (let [[eic r'] (br/f r9 1)
+                [emc r''] (br/f r' 1)
+                [ewm r'''] (br/f r'' 1)
+                [edf r''''] (br/f r''' 1)
+                [eoh r5*] (br/f r'''' 1)
+                [ejc ermv r6*]
+                (if (= eoh 1)
+                  (let [[j r'] (br/f r5* 1)
+                        [rmv r''] (br/f r' 1)]
+                    [j rmv r''])
+                  [0 0 r5*])
+                [seq-choose-scr r7*] (br/f r6* 1)
+                [scr r8*]
+                (if (= seq-choose-scr 1)
+                  [SELECT_SCREEN_CONTENT_TOOLS r7*]
+                  (br/f r7* 1))
+                [choose-int-mv r9*]
+                (if (> scr 0) (br/f r8* 1) [0 r8*])
+                [int-mv r10*]
+                (if (> scr 0)
+                  (if (= choose-int-mv 1) [SELECT_INTEGER_MV r9*] (br/f r9* 1))
+                  [SELECT_INTEGER_MV r9*])
+                [ohb r11*]
+                (if (= eoh 1)
+                  (let [[bits r'] (br/f r10* 3)] [(inc bits) r'])
+                  [0 r10*])]
+            [eic emc ewm edf eoh ejc ermv scr int-mv ohb r11*]))
+        [enable-superres r11] (br/f r10 1)
+        [enable-cdef r12] (br/f r11 1)
+        [enable-restoration r13] (br/f r12 1)
+        [color-config r14] (parse-color-config r13 (:seq-profile base))
+        [film-grain-params-present r15] (br/f r14 1)]
+    [(merge base
+            {:frame-width-bits-minus-1 frame-width-bits-minus-1
+             :frame-height-bits-minus-1 frame-height-bits-minus-1
+             :max-frame-width-minus-1 max-frame-width-minus-1
+             :max-frame-height-minus-1 max-frame-height-minus-1
+             :max-frame-width (inc max-frame-width-minus-1)
+             :max-frame-height (inc max-frame-height-minus-1)
+             :frame-id-numbers-present-flag frame-id-numbers-present-flag
+             :delta-frame-id-length-minus-2 delta-frame-id-length-minus-2
+             :additional-frame-id-length-minus-1 additional-frame-id-length-minus-1
+             :use-128x128-superblock use-128x128-superblock
+             :enable-filter-intra enable-filter-intra
+             :enable-intra-edge-filter enable-intra-edge-filter
+             :enable-interintra-compound enable-interintra-compound
+             :enable-masked-compound enable-masked-compound
+             :enable-warped-motion enable-warped-motion
+             :enable-dual-filter enable-dual-filter
+             :enable-order-hint enable-order-hint
+             :enable-jnt-comp enable-jnt-comp
+             :enable-ref-frame-mvs enable-ref-frame-mvs
+             :seq-force-screen-content-tools seq-force-screen-content-tools
+             :seq-force-integer-mv seq-force-integer-mv
+             :order-hint-bits order-hint-bits
+             :enable-superres enable-superres
+             :enable-cdef enable-cdef
+             :enable-restoration enable-restoration
+             :film-grain-params-present film-grain-params-present}
+            color-config)
+     r15]))
+
+(defn- parse-post-operating-points [r base] (first (parse-common-tail r base)))
+(defn- parse-post-operating-points-general [r base] (first (parse-common-tail r base)))
