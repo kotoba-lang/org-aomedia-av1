@@ -448,3 +448,115 @@
    walk over real bits)."
   []
   (load-resource "av1/fixtures/keyframe-64x64-split16.obu"))
+
+(defn keyframe-8x8-adst-diag-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 8x8 MONOCHROME keyframe -- the
+   ADST-extension validation fixture (ADR-2607122000 Migration step 9
+   continuation, see av1.decode-block/av1.transform namespace docstrings'
+   ADST sections). `--min-partition-size=4 --max-partition-size=4` forces
+   decode_partition() down to a real 2x2 grid of BLOCK_4X4 leaves (the
+   smallest leaf size this repo's partition tree can reach -- spec #Decode
+   partition syntax's `bsize < BLOCK_8X8 -> PARTITION_NONE` base case,
+   reached via a real, normally-signaled `partition` symbol read at
+   BLOCK_8X8 forced toward PARTITION_SPLIT by the min/max-partition-size
+   constraint -- not a zero-bit structural forcing). Content is an 8x8
+   raw gray y4m frame with a hard diagonal step edge (`40` where
+   `x+y<8` else `220`, authored directly as known pixel bytes, not via a
+   lavfi filter) -- diagonal step edges are the classic content AV1's
+   RDO tx-type search prefers ADST over DCT for (DCT assumes even
+   symmetry at the block boundary; ADST doesn't), and empirically (see
+   below) this content makes aomenc's real encoder choose `ADST_ADST` for
+   2 of the 4 BLOCK_4X4 leaves -- not merely plausible, confirmed by
+   actually decoding and inspecting the real chosen TxType, then
+   cross-checking the full reconstruction bit-exact against dav1d.
+   `--enable-flip-idtx=0` additionally restricts the encoder's TX_SET_
+   INTRA_1 search to exclude IDTX/V_DCT/H_DCT/FLIPADST_* (this repo's
+   av1.transform has no identity-transform or flip-reconstruction
+   implementation, see their docstrings), so only {DCT_DCT, ADST_DCT,
+   DCT_ADST, ADST_ADST} are ever legal outputs of this specific encode --
+   `--enable-directional-intra=0`/`--enable-smooth-intra=0`/
+   `--enable-paeth-intra=0`/`--enable-filter-intra=0`/`--enable-palette=0`/
+   `--enable-intrabc=0`/`--enable-angle-delta=0` keep the intra-mode
+   restriction identical to the pre-existing DC/V/H-only fixtures above.
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=0 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --enable-flip-idtx=0 \\
+       --min-partition-size=4 --max-partition-size=4 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-8x8-adst-diag.obu keyframe-8x8-adst-diag.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-8x8-adst-diag.obu -o
+   keyframe-8x8-adst-diag.dav1d.yuv` (dav1d 1.5.3) produced the raw 8-bit
+   gray 8x8 luma plane checked in as `keyframe-8x8-adst-diag.dav1d.yuv` --
+   see `keyframe-8x8-adst-diag-golden-yuv` below and
+   test/av1/decode_block_test.clj for the bit-exact comparison against
+   this repo's decoder, and for the assertion that the two center leaves
+   (r=0,c=1 and r=1,c=0) really did decode as `:ADST_ADST` (not merely
+   `:DCT_DCT`) -- i.e. this fixture exercises av1.transform/inverse-adst4!
+   for real, not just av1.decode-block's transform_type()-reading
+   machinery in isolation."
+  []
+  (load-resource "av1/fixtures/keyframe-8x8-adst-diag.obu"))
+
+(defn keyframe-8x8-adst-diag-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-8x8-adst-diag-bytes` (64
+   bytes, row-major 8x8) -- the independent ground truth
+   test/av1/decode_block_test.clj compares this repo's decoder output
+   against."
+  []
+  (load-resource "av1/fixtures/keyframe-8x8-adst-diag.dav1d.yuv"))
+
+(defn keyframe-8x8-adst-quad-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 8x8 MONOCHROME keyframe, same
+   encoder invocation as `keyframe-8x8-adst-diag-bytes` above (see its
+   docstring for the full aomenc command and the ADST-extension scope this
+   validates) but with a DIFFERENT edge pattern per BLOCK_4X4 leaf quadrant
+   (a vertical step in the top-left leaf, a horizontal step in the
+   top-right leaf, a reversed vertical step in the bottom-left leaf, and a
+   diagonal step in the bottom-right leaf -- all authored directly as
+   known pixel bytes). This content makes aomenc choose a genuinely
+   DIFFERENT ADST-family TxType than the diag fixture -- `DCT_ADST` (not
+   `ADST_ADST`) for the bottom-right (diagonal) leaf -- broadening this
+   repo's real-decode validation to a second ADST-family TxType, still
+   with the SAME encoder restrictions (`--enable-flip-idtx=0` etc, see the
+   diag fixture's docstring) guaranteeing only {DCT_DCT, ADST_DCT,
+   DCT_ADST, ADST_ADST} are legal outputs of this encode.
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=0 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --enable-flip-idtx=0 \\
+       --min-partition-size=4 --max-partition-size=4 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-8x8-adst-quad.obu keyframe-8x8-adst-quad.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-8x8-adst-quad.obu -o
+   keyframe-8x8-adst-quad.dav1d.yuv` (dav1d 1.5.3) produced the raw 8-bit
+   gray 8x8 luma plane checked in as `keyframe-8x8-adst-quad.dav1d.yuv` --
+   see `keyframe-8x8-adst-quad-golden-yuv` below and
+   test/av1/decode_block_test.clj for the bit-exact comparison and the
+   `:DCT_ADST` assertion on the bottom-right (r=1,c=1) leaf."
+  []
+  (load-resource "av1/fixtures/keyframe-8x8-adst-quad.obu"))
+
+(defn keyframe-8x8-adst-quad-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-8x8-adst-quad-bytes` (64
+   bytes, row-major 8x8) -- the independent ground truth
+   test/av1/decode_block_test.clj compares this repo's decoder output
+   against."
+  []
+  (load-resource "av1/fixtures/keyframe-8x8-adst-quad.dav1d.yuv"))

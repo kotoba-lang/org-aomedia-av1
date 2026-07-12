@@ -60,6 +60,80 @@
 (defn- t-get [t i] (nth t i))
 (defn- t-set [t i v] (assoc! t i v))
 
+;; ---------------------------------------------------------------------
+;; Inverse ADST process (spec 7.13.2.6, "Inverse ADST4 process" -- ADR-
+;; 2607122000 Migration step 9 ADST extension). Only size 4 (n=2) is
+;; implemented -- this repo's ADST extension supports exactly one new
+;; transform size, TX_4X4 (see av1.decode-block namespace docstring's ADST
+;; section); ADST8/ADST16 (n=3/4, needed for TX_8X8/TX_16X16 ADST) are out
+;; of scope and av1.decode-block never calls this with n!=2.
+;;
+;; SINPI_1_9..SINPI_4_9 (08.decoding.process.md #Inverse ADST4 process)
+;; cross-checked against libaom's av1_iadst4 (av1/common/av1_inv_txfm1d.c,
+;; AOMediaCodec/aom master, fetched 2026-07-13): aom's sinpi_arr(12) uses
+;; the identical 4 constants and the same algebraic structure (s0..s6/a7/b7/
+;; x0..x3 stage-for-stage), confirming this transcription against a second,
+;; independent implementation of the same process (not just re-reading the
+;; same spec paragraph twice).
+(def SINPI_1_9 1321)
+(def SINPI_2_9 2482)
+(def SINPI_3_9 3344)
+(def SINPI_4_9 3803)
+
+(defn inverse-adst4!
+  "spec #Inverse ADST4 process: in-place inverse ADST of the transient
+   vector `t` (length 4). `r` (intermediate clamping range) is accepted
+   only for signature parity with inverse-dct!/B/H -- like B's `_r`, the
+   spec documents it as a bitstream-conformance precision requirement on
+   the s/x intermediates, not a value this process's own arithmetic reads
+   or clips against (ADST4 has no B/H butterfly calls, so there is no
+   clip3 to apply here)."
+  [t _r]
+  (let [T0 (t-get t 0) T1 (t-get t 1) T2 (t-get t 2) T3 (t-get t 3)
+        s0 (* SINPI_1_9 T0)
+        s1 (* SINPI_2_9 T0)
+        s2 (* SINPI_3_9 T1)
+        s3 (* SINPI_4_9 T2)
+        s4 (* SINPI_1_9 T2)
+        s5 (* SINPI_2_9 T3)
+        s6 (* SINPI_4_9 T3)
+        a7 (- T0 T2)
+        b7 (+ a7 T3)
+        s0 (+ s0 s3)
+        s1 (- s1 s4)
+        s3 s2
+        s2 (* SINPI_3_9 b7)
+        s0 (+ s0 s5)
+        s1 (- s1 s6)
+        x0 (+ s0 s3)
+        x1 (+ s1 s3)
+        x2 s2
+        x3 (+ s0 s1)
+        x3 (- x3 s3)]
+    (-> t
+        (t-set 0 (round2 x0 12))
+        (t-set 1 (round2 x1 12))
+        (t-set 2 (round2 x2 12))
+        (t-set 3 (round2 x3 12)))))
+
+(defn inverse-adst!
+  "spec #Inverse ADST process (7.13.2.9): dispatches on n (2<=n<=4). Only
+   n=2 (ADST4, TX_4X4) is implemented -- see namespace docstring."
+  [t n r]
+  (when (not= n 2)
+    (throw (ex-info "av1.transform: internal: inverse-adst! only supports n=2 (ADST4/TX_4X4)"
+                     {:reason :unsupported-adst-size :n n})))
+  (inverse-adst4! t r))
+
+;; Inverse identity transform 4 process (spec 7.13.2.11) -- included for
+;; completeness alongside inverse-adst4! since IDTX is a structurally
+;; reachable TX_SET_INTRA_1/2 symbol value even though av1.decode-block
+;; currently restricts the DECODED TxType away from IDTX (throws rather
+;; than calling this). Kept unused (not wired into inverse-transform-2d)
+;; until a future extension actually needs it.
+(defn inverse-identity-4! [t]
+  (reduce (fn [t i] (t-set t i (round2 (* (t-get t i) 5793) 12))) t (range 4)))
+
 (defn B
   "spec #Butterfly functions: B(a,b,angle,flip,r) -- butterfly rotation
    (+ index swap when flip==1). Returns the updated transient T. `r` is
@@ -180,53 +254,92 @@
     (vec (repeat w 0))
     (mapv (fn [j] (if (< j tw) (nth dequant-2d (+ (* row-idx tw) j)) 0)) (range w))))
 
-(defn inverse-transform-2d
-  "spec #2D inverse transform process (7.13.3), DCT_DCT only (row and
-   column transform both invoke inverse-dct!; av1.decode-block throws
-   before calling this fn for any other PlaneTxType/Lossless combination).
-   `dequant` is the flat row-major tw*th Dequant array from `dequantize`
-   (tw = th = Min(32,w) -- for this phase's only supported size, TX_32X32,
-   tw==th==w==h==32 so no zero-padding is actually exercised, but the
-   general w>32/h>32 zero-padding step is still implemented for fidelity).
-   Returns Residual as a flat row-major w*h vector.
+;; PlaneTxType -> {row,col} 1D-transform-kind dispatch (spec #2D inverse
+;; transform process's two "if PlaneTxType is equal to one of ..." lists).
+;; Only the 4 TxTypes this repo's ADST extension can ever produce are
+;; covered (:DCT_DCT already existed; :ADST_DCT/:DCT_ADST/:ADST_ADST added
+;; for the ADST extension, see av1.decode-block namespace docstring) --
+;; every other spec TxType (FLIPADST_*/V_*/H_*/IDTX) either needs the
+;; identity transform or the flipUD/flipLR reconstruction step, neither of
+;; which av1.decode-block ever reaches (it throws before producing any
+;; TxType outside this set of 4), so `row-transform-kind`/`col-transform-
+;; kind` throw for internal-consistency rather than silently defaulting.
+(defn- row-transform-kind [tx-type]
+  (case tx-type
+    :DCT_DCT :dct
+    :ADST_DCT :dct
+    :DCT_ADST :adst
+    :ADST_ADST :adst
+    (throw (ex-info "av1.transform: internal: unsupported PlaneTxType for row transform"
+                     {:reason :unsupported-tx-type :tx-type tx-type}))))
 
-   log2W/log2H equal (square transform only, matches this phase's TX_32X32
-   scope) so the `Abs(log2W-log2H)==1` rectangular-transform rescale step
-   is never exercised and is omitted (av1.decode-block only calls this fn
-   for square transforms)."
-  [dequant log2W log2H bit-depth]
-  (let [w (bit-shift-left 1 log2W) h (bit-shift-left 1 log2H)
-        tw (min 32 w) th (min 32 h)
-        row-shift (case log2W 2 0 3 1 4 2 5 2 6 2)
-        col-shift 4
-        row-clamp (+ bit-depth 8)
-        col-clamp (max (+ bit-depth 6) 16)
-        ;; row transforms
-        row-residual
-        (mapv (fn [i]
-                (let [row (make-row dequant w i tw th)
-                      t0 (transient row)
-                      t1 (inverse-dct! t0 log2W row-clamp)
-                      out (persistent! t1)]
-                  (mapv #(round2 % row-shift) out)))
-              (range h))
-        ;; clip between row and column transforms
-        clipped (mapv (fn [row] (mapv #(clip3 (- (bit-shift-left 1 (dec col-clamp))) (dec (bit-shift-left 1 (dec col-clamp))) %) row)) row-residual)
-        ;; column transforms
-        cols (mapv (fn [j]
-                     (let [col (mapv #(nth (nth clipped %) j) (range h))
-                           t0 (transient col)
-                           t1 (inverse-dct! t0 log2H col-clamp)
-                           out (persistent! t1)]
-                       (mapv #(round2 % col-shift) out)))
-                   (range w))]
-    ;; transpose cols (w vectors of length h) back to row-major h x w
-    (vec (for [i (range h) j (range w)] (nth (nth cols j) i)))))
+(defn- col-transform-kind [tx-type]
+  (case tx-type
+    :DCT_DCT :dct
+    :ADST_DCT :adst
+    :DCT_ADST :dct
+    :ADST_ADST :adst
+    (throw (ex-info "av1.transform: internal: unsupported PlaneTxType for column transform"
+                     {:reason :unsupported-tx-type :tx-type tx-type}))))
+
+(defn- apply-1d! [t n r kind]
+  (case kind
+    :dct (inverse-dct! t n r)
+    :adst (inverse-adst! t n r)))
+
+(defn inverse-transform-2d
+  "spec #2D inverse transform process (7.13.3). `tx-type` (default
+   :DCT_DCT, for pre-existing callers) selects which 1D transform runs on
+   each axis via row-transform-kind/col-transform-kind above -- for
+   :DCT_DCT this is byte-for-byte the same computation as before the ADST
+   extension (both axes still invoke inverse-dct!). `dequant` is the flat
+   row-major tw*th Dequant array from `dequantize` (tw = th = Min(32,w) --
+   for this phase's supported sizes, TX_32X32/TX_4X4, tw==th==w==h always,
+   so no zero-padding is actually exercised, but the general w>32/h>32
+   zero-padding step is still implemented for fidelity). Returns Residual
+   as a flat row-major w*h vector.
+
+   log2W/log2H equal (square transform only, matches this phase's
+   TX_32X32/TX_4X4 scope) so the `Abs(log2W-log2H)==1` rectangular-
+   transform rescale step is never exercised and is omitted (av1.decode-
+   block only calls this fn for square transforms)."
+  ([dequant log2W log2H bit-depth] (inverse-transform-2d dequant log2W log2H bit-depth :DCT_DCT))
+  ([dequant log2W log2H bit-depth tx-type]
+   (let [w (bit-shift-left 1 log2W) h (bit-shift-left 1 log2H)
+         tw (min 32 w) th (min 32 h)
+         row-shift (case log2W 2 0 3 1 4 2 5 2 6 2)
+         col-shift 4
+         row-clamp (+ bit-depth 8)
+         col-clamp (max (+ bit-depth 6) 16)
+         row-kind (row-transform-kind tx-type)
+         col-kind (col-transform-kind tx-type)
+         ;; row transforms
+         row-residual
+         (mapv (fn [i]
+                 (let [row (make-row dequant w i tw th)
+                       t0 (transient row)
+                       t1 (apply-1d! t0 log2W row-clamp row-kind)
+                       out (persistent! t1)]
+                   (mapv #(round2 % row-shift) out)))
+               (range h))
+         ;; clip between row and column transforms
+         clipped (mapv (fn [row] (mapv #(clip3 (- (bit-shift-left 1 (dec col-clamp))) (dec (bit-shift-left 1 (dec col-clamp))) %) row)) row-residual)
+         ;; column transforms
+         cols (mapv (fn [j]
+                      (let [col (mapv #(nth (nth clipped %) j) (range h))
+                            t0 (transient col)
+                            t1 (apply-1d! t0 log2H col-clamp col-kind)
+                            out (persistent! t1)]
+                        (mapv #(round2 % col-shift) out)))
+                    (range w))]
+     ;; transpose cols (w vectors of length h) back to row-major h x w
+     (vec (for [i (range h) j (range w)] (nth (nth cols j) i))))))
 
 (defn dq-denom
   "spec #Reconstruct process: dqDenom by txSz -- TX_32X32/TX_16X32/TX_32X16/
    TX_16X64/TX_64X16 -> 2, TX_64X64/TX_32X64/TX_64X32 -> 4, else 1. This
-   phase only supports TX_32X32 (dqDenom==2); the full rule is transcribed
+   repo supports TX_32X32 (dqDenom==2) and, per the ADST extension,
+   TX_4X4 (dqDenom==1, the `:else` branch); the full rule is transcribed
    for fidelity since it's a cheap `cond`."
   [tx-sz]
   (cond
