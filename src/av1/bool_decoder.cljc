@@ -126,9 +126,17 @@
   "spec 8.2.6 exit_symbol(): advances the underlying bit-reader past any
    trailing bits not yet consumed by symbol decode (Max(0,SymbolMaxBits)
    bits), leaving the reader byte-aligned at the end of the coded payload.
-   Returns the reader' (not the full bool-decoder state)."
+   Returns the reader' (not the full bool-decoder state).
+
+   Uses br/skip-bits (position-only advance), not br/f -- for a real-sized
+   tile (hundreds to thousands of bytes) `skip` here can be in the
+   thousands of bits, and br/f accumulates an actual integer value bit by
+   bit (`2*x + bit`) which overflows a 64-bit long long before the skip
+   completes (Clojure's arithmetic is overflow-checked by default). This
+   was never exercised by the Phase 0 test vectors (sz=2 bytes, skip <=
+   1 bit) -- only surfaced once real multi-hundred-byte tiles were decoded
+   (av1.tile-group, Phase 0/1 Migration step 9 continuation)."
   [state]
   (let [{:keys [reader symbol-max-bits]} state
-        skip (max 0 symbol-max-bits)
-        [_ reader'] (br/f reader skip)]
-    reader'))
+        skip (max 0 symbol-max-bits)]
+    (br/skip-bits reader skip)))
