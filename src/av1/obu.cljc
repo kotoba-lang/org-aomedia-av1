@@ -10,7 +10,8 @@
    self-delimiting via a leb128 obu_size. This is what ffmpeg's `-f obu`
    muxer produces and is also the format required by the spec whenever no
    surrounding container supplies lengths."
-  (:require [av1.bitreader :as br]))
+  (:require [av1.bitreader :as br]
+            [av1.bitwriter :as bw]))
 
 (def obu-type->kw
   {0 :reserved
@@ -92,6 +93,40 @@
    next OBU boundary)."
   [reader pos]
   (assoc reader :pos pos))
+
+;; =======================================================================
+;; ENCODE side: `write-obu-header`/`write-obu` -- the encode-side inverse
+;; of `parse-obu-header`/`parse-obu` above (2026-07 AV1 encode task,
+;; ADR-2607122000 Migration step 9 continuation). Only the low-overhead
+;; bitstream format (`obu_has_size_field == 1`, this namespace's only
+;; supported format on the decode side too, see namespace docstring) with
+;; no extension header (`obu_extension_flag == 0`, `temporal_id`/
+;; `spatial_id` both 0) -- this repo's encode scope never needs scalable
+;; OBU dropping.
+
+(defn write-obu-header
+  "spec #OBU header syntax, `obu_extension_flag=0` only (this namespace's
+   encode scope)."
+  [writer obu-type-num]
+  (-> writer
+      (bw/f 1 0)   ;; obu_forbidden_bit = 0
+      (bw/f 4 obu-type-num)
+      (bw/f 1 0)   ;; obu_extension_flag = 0
+      (bw/f 1 1)   ;; obu_has_size_field = 1
+      (bw/f 1 0))) ;; obu_reserved_1bit = 0
+
+(defn write-obu
+  "Writes one complete `open_bitstream_unit()`: header + leb128 `obu_size` +
+   payload. `payload-bytes` is the ALREADY-SERIALIZED payload (a vector of
+   byte values 0-255, e.g. from av1.bitwriter/to-bytes) -- this fn is
+   payload-format-agnostic (obu_size is simply `(count payload-bytes)`),
+   matching how `parse-obu` itself never interprets the payload, only
+   frames it. `writer` must already be byte-aligned (every OBU starts
+   byte-aligned, spec 5.2)."
+  [writer obu-type-num payload-bytes]
+  (let [w1 (write-obu-header writer obu-type-num)
+        w2 (bw/leb128 w1 (count payload-bytes))]
+    (reduce (fn [w byte] (bw/f w 8 byte)) w2 payload-bytes)))
 
 (defn parse-all
   "Walk an entire OBU stream (byte-array/vector), calling

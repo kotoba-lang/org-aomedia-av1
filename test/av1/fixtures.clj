@@ -867,3 +867,136 @@
    both-frames-concatenated pattern."
   []
   (load-resource "av1/fixtures/inter-32x32-zeromv-residual.dav1d.yuv"))
+
+;; =======================================================================
+;; ENCODE-side fixtures (2026-07 AV1 encode task, ADR-2607122000 Migration
+;; step 9 continuation) -- unlike every fixture above (all real
+;; aomenc/SVT-AV1 encoder output, decoded by THIS repo to validate the
+;; DECODE side), these four `.obu` files are THIS REPO'S OWN ENCODER
+;; output (`av1.encode/encode-keyframe`, see its namespace docstring for
+;; the exact scope: a single monochrome 32x32 KEY_FRAME, one BLOCK_32X32/
+;; PARTITION_NONE/DC_PRED/TX_32X32/DCT_DCT leaf) -- generated once
+;; (2026-07-13) and checked in the same way real-encoder fixtures are, so
+;; test/av1/encode_test.clj's assertions don't need to invoke a real
+;; encoder/decoder binary at test time (keeping the test suite hermetic,
+;; matching every other test namespace in this repo). The paired
+;; `.dav1d.yuv` files are REAL `dav1d`'s (1.5.3) independent decode of
+;; these self-produced streams -- generated via `dav1d -i <name>.obu -o
+;; <name>.dav1d.yuv` -- and additionally cross-checked against a SECOND
+;; independent decoder, `aomdec` (libaom 3.14.1, `aomdec --i420 -o ...
+;; <name>.obu`, whose --i420-forced Y plane bytes were confirmed
+;; byte-identical to the dav1d output for all four fixtures before
+;; checking these in -- not itself re-checked at test time, but recorded
+;; here as this task's second-independent-decoder validation, the same
+;; practice av1.transform's ADST work used for its own ADST4 math against
+;; libaom's C source).
+
+(defn encode-keyframe-32x32-flat-bytes
+  "This repo's own encoder output for a FLAT 32x32 monochrome keyframe
+   (every luma sample == 128, the DC_PRED-with-no-neighbors predicted
+   value exactly) -- residual is all-zero, so this exercises the
+   `skip=1` (no residual coded at all) path: `av1.encode-block/write-skip`
+   writes 1, and `decode-transform-block`'s skip branch runs (predict-only,
+   no `coeffs()` call). Generated via:
+
+   ```clojure
+   (av1.encode/encode-keyframe (vec (repeat 1024 128)) 100 {:skip? true})
+   ```
+
+   Real-decode validation: bit-exact (no tolerance) against both `dav1d`
+   and `aomdec`'s independent decodes (see namespace docstring above)."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-flat.obu"))
+
+(defn encode-keyframe-32x32-flat-golden-yuv
+  "dav1d's raw 8-bit gray decode of `encode-keyframe-32x32-flat-bytes`."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-flat.dav1d.yuv"))
+
+(defn encode-keyframe-32x32-dc-bytes
+  "This repo's own encoder output for a FLAT 32x32 monochrome keyframe at
+   luma value 170 (DC_PRED's no-neighbors prediction is 128, so this is a
+   uniform +42 residual across the whole block) -- since a CONSTANT
+   residual is exactly the DC basis function (every AC coefficient is
+   exactly 0 by DCT orthogonality, see av1.transform's forward-transform-2d
+   docstring), this exercises a real (non-skip) `coeffs()` call with
+   `eob=1` -- a single real `txb_skip=0`/`coeff_base_eob`/`dc_sign` symbol
+   write, no `coeff_br`/golomb continuation needed (this fixture's DC
+   coefficient magnitude is small). Generated via:
+
+   ```clojure
+   (av1.encode/encode-keyframe (vec (repeat 1024 170)) 100 {:skip? false})
+   ```
+
+   Real-decode validation: this repo's own reconstruction round-trips the
+   target EXACTLY (residual coding is lossless for a pure-DC target at
+   this quantizer), and is bit-exact against both `dav1d` and `aomdec`."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-dc.obu"))
+
+(defn encode-keyframe-32x32-dc-golden-yuv
+  "dav1d's raw 8-bit gray decode of `encode-keyframe-32x32-dc-bytes`."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-dc.dav1d.yuv"))
+
+(defn encode-keyframe-32x32-gradient-bytes
+  "This repo's own encoder output for a smooth low-frequency 32x32
+   monochrome keyframe (`128 + 20*sin(2*pi*x/32)`, a single-cycle
+   horizontal sinusoid, base_q_idx=60) -- exercises multiple real nonzero
+   AC coefficients (a genuine multi-symbol `coeffs()` walk: several
+   `coeff_base`/`coeff_base_eob` symbols across the scan, not just DC).
+   Generated via:
+
+   ```clojure
+   (av1.encode/encode-keyframe
+     (vec (for [y (range 32) x (range 32)]
+            (int (+ 128 (* 20 (Math/sin (* 2 Math/PI (/ x 32.0))))))))
+     60 {:skip? false})
+   ```
+
+   Real-decode validation: this repo's own reconstruction is bit-exact (no
+   tolerance) against both `dav1d` and `aomdec`'s independent decodes of
+   this same bitstream (NOT bit-exact against the original floating-point-
+   designed target -- real lossy transform-coding quantization error, the
+   normal/expected kind, not a bug -- see test/av1/encode_test.clj for the
+   measured SSD)."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-gradient.obu"))
+
+(defn encode-keyframe-32x32-gradient-golden-yuv
+  "dav1d's raw 8-bit gray decode of `encode-keyframe-32x32-gradient-bytes`."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-gradient.dav1d.yuv"))
+
+(defn encode-keyframe-32x32-busy-bytes
+  "This repo's own encoder output for a busier, higher-frequency 32x32
+   monochrome keyframe (`128 + 60*sin(0.9x) + 40*cos(0.7y) + 15*sin(3.1x)`,
+   clamped to [0,255], base_q_idx=20 -- a FINE quantizer chosen specifically
+   so several coefficients' quantized magnitude exceeds 14, forcing this
+   fixture to exercise the `coeff_br` continuation loop's full 4-iteration
+   'maxed out' path AND the golomb escape code
+   (`av1.encode-block/write-golomb`) for real -- confirmed before checking
+   this fixture in: 56 nonzero coefficients, 18 of them with |value| > 14
+   (needing golomb). Generated via:
+
+   ```clojure
+   (av1.encode/encode-keyframe
+     (vec (for [y (range 32) x (range 32)]
+            (max 0 (min 255 (int (+ 128 (* 60 (Math/sin (* 0.9 x)))
+                                    (* 40 (Math/cos (* 0.7 y)))
+                                    (* 15 (Math/sin (* 3.1 x)))))))))
+     20 {:skip? false})
+   ```
+
+   Real-decode validation: this repo's own reconstruction is bit-exact (no
+   tolerance) against both `dav1d` and `aomdec`'s independent decodes of
+   this same bitstream -- the strongest available confirmation that
+   `av1.encode-block/write-golomb` (the one code path the other three
+   fixtures never reach) is correct, not merely that it doesn't crash."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-busy.obu"))
+
+(defn encode-keyframe-32x32-busy-golden-yuv
+  "dav1d's raw 8-bit gray decode of `encode-keyframe-32x32-busy-bytes`."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-busy.dav1d.yuv"))

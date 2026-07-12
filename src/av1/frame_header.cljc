@@ -25,7 +25,8 @@
    phase does not maintain (RefOrderHint/RefValid/ref_frame_idx across
    frames) and are not supported -- `parse` throws ex-info rather than
    silently mis-parsing."
-  (:require [av1.bitreader :as br]))
+  (:require [av1.bitreader :as br]
+            [av1.bitwriter :as bw]))
 
 (def KEY_FRAME 0)
 (def INTER_FRAME 1)
@@ -1060,3 +1061,96 @@
        :subsampling-y (:subsampling-y seq-hdr)
        :reader-after-quantization-params r18
        :reader-after-frame-header r27}))))
+
+;; =======================================================================
+;; ENCODE side: `write` -- the encode-side inverse of `parse` above, for
+;; THIS repo's narrow encode scope only (2026-07 AV1 encode task,
+;; ADR-2607122000 Migration step 9 continuation): a single KEY_FRAME,
+;; `reduced_still_picture_header==1` sequence header (see av1.sequence-
+;; header/write), monochrome, `base_q_idx > 0` (non-lossless, so
+;; `TX_MODE_LARGEST`/DCT_DCT is reachable -- av1.decode-block's
+;; guard-frame-scope! requires `coded_lossless=0` anyway), no CDEF/loop-
+;; restoration/segmentation/delta-q/delta-lf/film-grain/superres, a single
+;; tile. This collapses `parse`'s dozens of conditional fields down the
+;; SAME reduced_still_picture_header==1 path `parse` itself already
+;; documents as zero-bit-forced for most fields -- see this fn's inline
+;; comments for exactly which fields are zero-bit vs. real writes.
+;;
+;; Verified the same way av1.sequence-header/write is: round-tripped back
+;; through `parse` itself (see test/av1/frame_header_encode_test.clj) --
+;; `parse`'s own `:base-q-idx`/`:frame-width`/`:tile-info`/`:tx-mode`/
+;; etc. must reproduce exactly what `write` was asked to encode.
+;;
+;; `cfg` keys: `:base-q-idx` (1..255, 0 would force CodedLossless=1, out of
+;; av1.decode-block's scope) -- there is no `:frame-width`/`:frame-height`
+;; key here, since `frame_size_override_flag=0` (this fn's only supported
+;; path) means `frame_width`/`frame_height` come for free from the PAIRED
+;; sequence header's `max-frame-width`/`max-frame-height` (av1.sequence-
+;; header/write) -- the caller is responsible for pairing a `write` call
+;; here with a sequence header of the intended dimensions, exactly like
+;; `parse-frame-size` itself derives frame_width/frame_height from
+;; `seq-hdr` rather than reading them again per-frame."
+(defn write
+  [writer {:keys [base-q-idx]}]
+  (when-not (< 0 base-q-idx 256)
+    (throw (ex-info "av1.frame-header/write: base-q-idx must be in 1..255 (0 forces CodedLossless=1, out of this repo's decode scope)"
+                     {:base-q-idx base-q-idx})))
+  (-> writer
+      ;; -- uncompressed_header(), reduced_still_picture_header==1 path --
+      ;; show_existing_frame/frame_type/show_frame/showable_frame/
+      ;; error_resilient_mode: NOT written (reduced path forces
+      ;; KEY_FRAME/show_frame=1/showable_frame=0/error_resilient_mode=nil
+      ;; with zero bits, see `parse`'s own reduced-path branch).
+      (bw/f 1 0)          ;; disable_cdf_update = 0 (real per-tile CDF adaptation)
+      (bw/f 1 0)          ;; allow_screen_content_tools = 0 (seq_force_screen_content_tools == SELECT, real bit)
+      ;; force_integer_mv: NOT written (allow_screen_content_tools==0, so
+      ;; not read at all -- FrameIsIntra forces force_integer_mv=1 purely
+      ;; by computation, no bit either way).
+      ;; current_frame_id: NOT written (frame_id_numbers_present_flag=0).
+      ;; frame_size_override_flag: NOT written (reduced path forces 0).
+      ;; order_hint: NOT written (order_hint_bits=0 from reduced seq hdr path -> f(0)).
+      ;; primary_ref_frame: NOT written (FrameIsIntra forces PRIMARY_REF_NONE).
+      ;; buffer_removal_time_present_flag: NOT written (decoder_model_info_present_flag=0).
+      ;; refresh_frame_flags: NOT written (KEY_FRAME && show_frame==1 forces allFrames).
+      ;; ref_order_hint loop: NOT written (skipped, see `parse`'s own condition).
+      ;; -- FrameIsIntra branch: frame_size() + superres_params() + render_size() + allow_intrabc --
+      ;; frame_size(): frame_size_override_flag=0 -> frame_width/height ==
+      ;; max_frame_width/height directly, NO bits written here at all.
+      ;; superres_params(): NOT written (enable_superres==0 from the
+      ;; sequence header -> use_superres forced 0, zero bits read).
+      (bw/f 1 0)          ;; render_size(): render_and_frame_size_different = 0
+      ;; allow_intrabc: NOT written (allow_screen_content_tools==0).
+      ;; disable_frame_end_update_cdf: NOT written (reduced_still_picture_header==1 forces 1).
+      ;; -- tile_info(): single 64x64-superblock tile covering an 8x8-mi (32x32px) frame --
+      (bw/f 1 1)          ;; uniform_tile_spacing_flag = 1
+      ;; tile_cols_log2/tile_rows_log2 increment loops: NOT written (both
+      ;; min_log2==max_log2==0 for this frame's tiny sb_cols=sb_rows=1
+      ;; shape, so the `while` loop never executes on the decode side --
+      ;; matches this fn writing nothing here). context_update_tile_id/
+      ;; tile_size_bytes: NOT written (tile_cols_log2==tile_rows_log2==0).
+      ;; -- quantization_params() --
+      (bw/f 8 base-q-idx)  ;; base_q_idx
+      (bw/f 1 0)           ;; delta_q_y_dc: delta_coded = 0 (DeltaQYDc=0)
+      ;; num_planes==1 (mono) -> no uv delta fields read at all.
+      (bw/f 1 0)           ;; using_qmatrix = 0
+      ;; -- segmentation_params(): primary_ref_frame==PRIMARY_REF_NONE --
+      (bw/f 1 0)           ;; segmentation_enabled = 0
+      ;; -- delta_q_params(): base_q_idx > 0 (asserted above) --
+      (bw/f 1 0)           ;; delta_q_present = 0
+      ;; delta_lf_params(): NOT written (delta_q_present==0).
+      ;; -- loop_filter_params(): CodedLossless will be 0 (base_q_idx>0, no deltas), allow_intrabc=0 --
+      (bw/f 6 0)           ;; loop_filter_level[0] = 0
+      (bw/f 6 0)           ;; loop_filter_level[1] = 0
+      ;; num_planes==1 -> loop_filter_level[2]/[3] not read.
+      (bw/f 3 0)           ;; loop_filter_sharpness = 0
+      (bw/f 1 0)           ;; loop_filter_delta_enabled = 0
+      ;; -- cdef_params(): NOT written (enable_cdef==0 from the sequence header). --
+      ;; -- lr_params(): NOT written (enable_restoration==0). --
+      ;; -- read_tx_mode(): CodedLossless==0 --
+      (bw/f 1 0)           ;; tx_mode_select = 0 (-> TX_MODE_LARGEST)
+      ;; frame_reference_mode()/skip_mode_params(): NOT written (FrameIsIntra, zero bits either way).
+      ;; allow_warped_motion: NOT written (FrameIsIntra forces 0).
+      (bw/f 1 0)           ;; reduced_tx_set = 0
+      ;; global_motion_params(): NOT written (FrameIsIntra, zero bits).
+      ;; film_grain_params(): NOT written (film_grain_params_present==0 from the sequence header).
+      ))

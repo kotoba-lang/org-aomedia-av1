@@ -41,6 +41,35 @@
      :symbol-range symbol-range
      :symbol-max-bits symbol-max-bits}))
 
+(defn adapt-cdf
+  "spec 8.2.4's CDF adaptation step, factored out to a pure fn (cdf/sym/n ->
+   cdf') so av1.bool-encoder's symbol ENCODER can share the exact same
+   adaptation arithmetic as this decoder -- both sides of a real AV1
+   bitstream must adapt every CDF identically after each symbol, or the two
+   desync; extracting this once (rather than transcribing the adaptation
+   formula a second time in av1.bool-encoder) makes that agreement
+   structural instead of something two independent transcriptions could
+   quietly drift apart on. `n` is nsyms (== `(dec (count cdf))`, the same
+   `n` read-symbol below already computes) and `sym` is the just-decoded
+   (or, from the encoder, just-encoded) symbol index."
+  [cdf sym n]
+  (let [count-val (nth cdf n)
+        rate (+ 3
+                (if (> count-val 15) 1 0)
+                (if (> count-val 31) 1 0)
+                (min (br/floor-log2 n) 2))
+        updated (loop [i 0, tmp 0, acc (transient cdf)]
+                  (if (>= i (dec n))
+                    acc
+                    (let [tmp' (if (= i sym) (bit-shift-left 1 15) tmp)
+                          ci (nth cdf i)
+                          ci' (if (< tmp' ci)
+                                (- ci (bit-shift-right (- ci tmp') rate))
+                                (+ ci (bit-shift-right (- tmp' ci) rate)))]
+                      (recur (inc i) tmp' (assoc! acc i ci')))))
+        updated' (assoc! updated n (+ count-val (if (< count-val 32) 1 0)))]
+    (persistent! updated')))
+
 (defn read-symbol
   "spec 8.2.4 (\"Symbol decoding process\"): decode one symbol against CDF
    `cdf` (a vector of N+1 ints; cdf[N-1] == 1<<15; cdf[N] is the adaptation
@@ -79,25 +108,9 @@
                                 (dec (bit-shift-left (inc new-value) bits)))
          max-bits' (- symbol-max-bits bits)
          ;; CDF adaptation, spec 8.2.4 (skipped when adapt? is false, i.e.
-         ;; disable_cdf_update == 1)
-         cdf' (if adapt?
-                (let [count-val (nth cdf n)
-                      rate (+ 3
-                              (if (> count-val 15) 1 0)
-                              (if (> count-val 31) 1 0)
-                              (min (br/floor-log2 n) 2))
-                      updated (loop [i 0, tmp 0, acc (transient cdf)]
-                                (if (>= i (dec n))
-                                  acc
-                                  (let [tmp' (if (= i sym') (bit-shift-left 1 15) tmp)
-                                        ci (nth cdf i)
-                                        ci' (if (< tmp' ci)
-                                              (- ci (bit-shift-right (- ci tmp') rate))
-                                              (+ ci (bit-shift-right (- tmp' ci) rate)))]
-                                    (recur (inc i) tmp' (assoc! acc i ci')))))
-                      updated' (assoc! updated n (+ count-val (if (< count-val 32) 1 0)))]
-                  (persistent! updated'))
-                cdf)]
+         ;; disable_cdf_update == 1) -- see adapt-cdf above (shared with
+         ;; av1.bool-encoder).
+         cdf' (if adapt? (adapt-cdf cdf sym' n) cdf)]
      [sym' cdf' {:reader reader'
                  :symbol-range range-shifted
                  :symbol-value value-renorm

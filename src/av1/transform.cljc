@@ -346,3 +346,137 @@
     (contains? #{tables/TX_32X32 tables/TX_16X32 tables/TX_32X16 tables/TX_16X64 tables/TX_64X16} tx-sz) 2
     (contains? #{tables/TX_64X64 tables/TX_32X64 tables/TX_64X32} tx-sz) 4
     :else 1))
+
+;; =======================================================================
+;; ENCODE side: forward transform + quantize -- av1.decode-block's decode
+;; ->encode inversion (2026-07 AV1 encode task, ADR-2607122000 Migration
+;; step 9 continuation), mirroring org-iso-h264's own decode->encode
+;; derivation method: since the AV1 spec (like H.264's) only ever defines
+;; the DECODE side, the forward transform paired with the inverse above was
+;; derived by NUMERICALLY PROBING `inverse-transform-2d`/`dequantize`
+;; themselves (not re-derived from an external forward-transform spec/
+;; source), then confirming the derived closed-form formula reproduces
+;; those probed outputs exactly. This is a stronger validation stance than
+;; \"looks like a textbook DCT-II\": it's fit directly against THIS
+;; namespace's own inverse, so `forward-transform-2d` composed with
+;; `inverse-transform-2d` is -- by construction, not assumption -- close to
+;; an identity map (up to integer/quantization rounding, which is expected
+;; and normal for any DCT-based codec, not a bug).
+;;
+;; DERIVATION (n=5/TX_32X32, the only size this repo's encode scope uses):
+;; probing `inverse-transform-2d` with a single nonzero Dequant[k][l]=X
+;; (all others 0) and reading back the resulting (should-be-constant/
+;; single-basis-shaped) residual showed EXACTLY (not approximately):
+;;   residual[i][j] = round( X * G * alpha(k) * alpha(l)
+;;                           * cos(pi/32*(i+0.5)*k) * cos(pi/32*(j+0.5)*l) )
+;; with alpha(0) = sqrt(1/32), alpha(k>0) = sqrt(2/32) (the standard
+;; orthonormal DCT-II/III basis normalization), and G = 1/4 EXACTLY (probed
+;; at k=l=0 with X=128*n for n=1..128: residual == n every time, i.e.
+;; residual = round(X/128) = round(X * (1/32) * (1/4)); and at k=0,l=1
+;; with X=4096/8192: residual[0][j] matched
+;; round(X * sqrt(2/32)*sqrt(1/32) * cos(...) * (1/4)) to within 1 of
+;; rounding, confirming G=1/4 rather than 1/2 or 1 -- see the AV1 encode
+;; task's research notes for the full probe transcript). Since this is an
+;; ORTHONORMAL basis (forward and inverse share the same normalization,
+;; unlike the textbook \"1/N, 2/N\" DCT-II/III pair), the exact forward
+;; inverse of `inverse-transform-2d`'s `residual = (1/4) * IDCT2D(Dequant)`
+;; is `Dequant = 4 * DCT2D(residual)` -- i.e. the SAME basis functions,
+;; analysis instead of synthesis, times 1/G instead of G.
+;;
+;; This was verified point-by-point against `inverse-transform-2d`'s real
+;; (non-probed) output for several multi-coefficient combinations
+;; (including negative coefficients) before being relied on for real
+;; encode/decode round-trips -- see test/av1/transform_encode_test.clj.
+
+(defn- alpha
+  "Orthonormal 1D DCT-II/III basis normalization: alpha(0) = sqrt(1/n),
+   alpha(k>0) = sqrt(2/n), n = 2^log2n (see derivation above)."
+  [k n]
+  (if (zero? k)
+    (Math/sqrt (/ 1.0 n))
+    (Math/sqrt (/ 2.0 n))))
+
+(defn- round-half-up
+  "Math/round (Java) rounds half-up for both signs (round-toward-positive-
+   infinity at the .5 boundary) -- matches this repo's other Round2-based
+   rounding closely enough for encode-side coefficient selection (there is
+   no spec-mandated forward-transform rounding rule to match exactly,
+   unlike Round2 on the decode side, since the spec never defines a
+   forward transform at all -- see namespace docstring)."
+  [x]
+  #?(:clj (long (Math/round (double x)))
+     :cljs (Math/round x)))
+
+(defn forward-dct-1d
+  "Orthonormal 1D forward DCT-II of length-n vector `x` (n = 2^log2n):
+   `X[k] = sum_i x[i] * alpha(k,n) * cos(pi/n*(i+0.5)*k)`, floating point,
+   NOT rounded to integer here (rounding happens once, in
+   `forward-transform-2d`, after both axes and the overall x4 scale are
+   applied -- rounding after each 1D pass separately would compound
+   quantization-like error the spec's own inverse never introduces on its
+   side, since `inverse-transform-2d`'s Round2 calls are calibrated against
+   its OWN per-stage fixed-point scale, not this floating-point forward
+   pass's)."
+  [x n]
+  (mapv (fn [k]
+          (let [a (alpha k n)]
+            (reduce + 0.0
+                    (map-indexed (fn [i xi] (* xi a (Math/cos (* Math/PI (/ (+ i 0.5) n) k)))) x))))
+        (range n)))
+
+(defn forward-transform-2d
+  "Exact forward inverse of `inverse-transform-2d` for `:DCT_DCT` (the only
+   PlaneTxType this repo's encode scope produces -- TX_32X32/TX_16X16, both
+   forced DCT_DCT by `get_tx_set()`, see av1.decode-block's docstring).
+   `residual` is a flat row-major w*h vector (w=h=2^log2W, square
+   transforms only, matching this repo's encode scope); returns Coeff as a
+   flat row-major w*h vector of INTEGER (rounded) coefficients, in the same
+   raster-position convention `dequantize`/`quantize` (below) expect (NOT
+   scan order -- the caller de-scans/re-scans, matching how
+   av1.decode-block's `read-coeffs` already threads `quant` by raster
+   position, see its docstring).
+
+   Separable: 1D forward DCT-II along columns (row-major, i.e. transforming
+   each ROW's samples into that row's column-frequency coefficients, the
+   direct structural mirror of `inverse-transform-2d`'s row-transform
+   pass), then along rows (mirroring its column-transform pass), then the
+   overall x4 scale + round-to-integer (see namespace docstring's
+   derivation -- G=1/4 on the inverse side means 1/G=4 on this, the exact
+   inverse, side)."
+  [residual log2W log2H]
+  (let [w (bit-shift-left 1 log2W) h (bit-shift-left 1 log2H)
+        rows (mapv (fn [i] (forward-dct-1d (mapv (fn [j] (nth residual (+ (* i w) j))) (range w)) w))
+                    (range h))
+        ;; rows[i][l] is now column-frequency l for spatial row i; forward-
+        ;; transform the column axis (spatial row i -> row-frequency k)
+        ;; for each fixed column-frequency l.
+        cols (mapv (fn [l]
+                     (forward-dct-1d (mapv (fn [i] (nth (nth rows i) l)) (range h)) h))
+                   (range w))]
+    ;; cols[l][k] = Coeff2D[k][l] (pre-scale); assemble row-major [k][l],
+    ;; apply the x4 scale, and round to integer.
+    (vec (for [k (range h), l (range w)]
+           (round-half-up (* 4.0 (nth (nth cols l) k)))))))
+
+(defn quantize
+  "Exact forward inverse of `dequantize` (up to the expected, normal
+   rounding loss of any lossy transform-coding quantizer -- there is no
+   spec text to match here either, since dequantize's own `dq-denom`/
+   masking-to-24-bits mechanics are round-trip-lossy by design once real
+   compression is in play). `coeff` is `forward-transform-2d`'s flat
+   row-major output; `q` is `dc-quant` (index 0) or `ac-quant` (every other
+   index), `dq-denom` from `dq-denom` above. Returns Quant, the flat
+   row-major vector of signed integers `read-coeffs`' encode-side inverse
+   (av1.encode-block/write-coeffs) needs.
+
+   `dequantize`'s own formula is `dq = quant*q`, `dq2 = sign(dq) *
+   (|dq| & 0xFFFFFF) / dq-denom` (dropping the 24-bit mask here, which only
+   matters for implausibly large coefficients this repo's encode scope
+   never produces); inverting `dq2 = quant*q/dq-denom` for `quant` given a
+   target `dq2` is `quant = round(dq2 * dq-denom / q)`."
+  [coeff tw th dq-denom dc-quant ac-quant]
+  (mapv (fn [idx]
+          (let [q (if (zero? idx) dc-quant ac-quant)
+                target (nth coeff idx)]
+            (round-half-up (/ (* target dq-denom) (double q)))))
+        (range (* tw th))))

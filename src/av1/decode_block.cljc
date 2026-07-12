@@ -850,7 +850,7 @@
 ;; luma (TX_32X32, bwl=5, w=32) and chroma (TX_16X16, bwl=4, w=16) --
 ;; DCT_DCT/TX_CLASS_2D only, per namespace docstring.
 
-(defn- get-coeff-base-ctx
+(defn get-coeff-base-ctx
   "spec 09.parsing.process.md get_coeff_base_ctx(), TX_CLASS_2D only (see
    namespace docstring -- DCT_DCT is the only supported PlaneTxType, so
    get_tx_class always returns TX_CLASS_2D). `bwl`/`w` are the transform
@@ -895,7 +895,7 @@
 (defn- dc-sign-delta [category]
   (case (long category) 1 -1 2 1 0))
 
-(defn- get-dc-sign-ctx [state plane col row w4 h4 mi-cols mi-rows]
+(defn get-dc-sign-ctx [state plane col row w4 h4 mi-cols mi-rows]
   (let [above (get-in state [:above-dc plane] {})
         left (get-in state [:left-dc plane] {})
         above-sum (reduce (fn [acc k]
@@ -927,12 +927,12 @@
 ;; needs them). `plane` namespaces the map (0/1/2), matching
 ;; `get-dc-sign-ctx` above.
 
-(defn- record-above! [state plane col w4 dc-category cul-level]
+(defn record-above! [state plane col w4 dc-category cul-level]
   (-> state
       (update-in [:above-dc plane] (fn [m] (reduce (fn [m k] (assoc m (+ col k) dc-category)) (or m {}) (range w4))))
       (update-in [:above-level plane] (fn [m] (reduce (fn [m k] (assoc m (+ col k) cul-level)) (or m {}) (range w4))))))
 
-(defn- record-left! [state plane row h4 dc-category cul-level]
+(defn record-left! [state plane row h4 dc-category cul-level]
   (-> state
       (update-in [:left-dc plane] (fn [m] (reduce (fn [m k] (assoc m (+ row k) dc-category)) (or m {}) (range h4))))
       (update-in [:left-level plane] (fn [m] (reduce (fn [m k] (assoc m (+ row k) cul-level)) (or m {}) (range h4))))))
@@ -970,7 +970,7 @@
                      0 (range h4))]
     (+ 7 (if (not= 0 above) 1 0) (if (not= 0 left) 1 0))))
 
-(defn- get-coeff-br-ctx
+(defn get-coeff-br-ctx
   "spec 09.parsing.process.md coeff_br ctx derivation, TX_CLASS_2D only.
    `bwl`/`w` as in get-coeff-base-ctx above."
   [quant pos bwl w]
