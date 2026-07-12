@@ -1,22 +1,42 @@
 (ns av1.intra-pred
   "AV1 intra prediction processes, transcribed from AV1 Bitstream & Decoding
    Process Specification section 7.11.2 (\"Intra prediction process\") --
-   7.11.2.5 (\"DC intra prediction process\") and 7.11.2.4 (\"Directional
-   intra prediction process\", V_PRED/H_PRED cases only) -- AOMediaCodec/
-   av1-spec master, 08.decoding.process.md #Intra prediction process / #DC
-   intra prediction process / #Directional intra prediction process
-   (fetched 2026-07-13, DC_PRED originally; V_PRED/H_PRED addition fetched
-   again 2026-07-13 for the Phase 1 mode-coverage extension below).
+   7.11.2.5 (\"DC intra prediction process\"), 7.11.2.4 (\"Directional
+   intra prediction process\", V_PRED/H_PRED cases only), and 7.11.2.2
+   (\"Basic intra prediction process\", PAETH_PRED) -- AOMediaCodec/av1-spec
+   master, 08.decoding.process.md #Intra prediction process / #DC intra
+   prediction process / #Directional intra prediction process / #Basic
+   intra prediction process (fetched 2026-07-13, DC_PRED originally;
+   V_PRED/H_PRED addition fetched again 2026-07-13 for the Phase 1
+   mode-coverage extension below; PAETH_PRED addition fetched again
+   2026-07-13 for the PAETH mode-coverage extension below, including the
+   general \"Intra prediction process\" section's AboveRow[-1]/LeftCol[-1]
+   (topleft corner sample) derivation that only PAETH_PRED (of this
+   namespace's supported modes) needs).
 
    SCOPE (Phase 1 continuation, ADR-2607122000 Migration step 9 -- see
    av1.decode-block namespace docstring for the full scope statement):
-   DC_PRED / V_PRED / H_PRED only (mode is not always a parameter here for
-   dc-predict, which keeps its original narrow signature; v-predict/
-   h-predict below are the new entry points -- av1.decode-block throws
-   before calling this namespace for any other intra mode: D45/D135/D113/
-   D157/D203/D67/SMOOTH*/PAETH are all still out of scope). 8-bit only.
-   Luma-only (plane is implicit -- caller passes the plane's own pixel
-   buffer).
+   DC_PRED / V_PRED / H_PRED / PAETH_PRED only (mode is not always a
+   parameter here for dc-predict, which keeps its original narrow
+   signature; v-predict/h-predict/paeth-predict below are the other entry
+   points -- av1.decode-block throws before calling this namespace for any
+   other intra mode: D45/D135/D113/D157/D203/D67/SMOOTH* are all still out
+   of scope). 8-bit only. Luma-only (plane is implicit -- caller passes the
+   plane's own pixel buffer).
+
+   PAETH_PRED (mode 12) is, per spec 08.decoding.process.md's general
+   \"Intra prediction process\" mode dispatch, NOT routed through the
+   directional intra prediction process at all (is_directional_mode(
+   PAETH_PRED) is false -- PAETH_PRED is modes 1..8's odd one out among
+   this namespace's four supported modes) -- it goes to its own \"basic
+   intra prediction process\" (7.11.2.2). This has a real, useful
+   consequence for av1.decode-block: intra_angle_info_y() is gated on
+   is_directional_mode(YMode), so PAETH_PRED blocks read NO angle_delta_y
+   bit at all (unlike V_PRED/H_PRED, which do -- see av1.decode-block/
+   read-angle-delta-y's docstring for that bug history) -- av1.decode-block
+   doesn't need any new angle-delta handling for this extension, only a
+   wider intra_frame_y_mode decode restriction and this namespace's new
+   paeth-predict.
 
    V_PRED (mode 1, Mode_To_Angle[V_PRED] == 90) and H_PRED (mode 2,
    Mode_To_Angle[H_PRED] == 180) are technically routed through the spec's
@@ -167,3 +187,57 @@
         h (bit-shift-left 1 log2H)
         lc (left-col-fn frame frame-w frame-h x y have-left? have-above? h bit-depth)]
     (vec (mapcat (fn [i] (repeat w (lc i))) (range h)))))
+
+;; ---------------------------------------------------------------------
+;; PAETH_PRED (spec 7.11.2.2 "Basic intra prediction process") -- the only
+;; supported mode that needs AboveRow[-1]/LeftCol[-1] (the topleft corner
+;; sample; LeftCol[-1] == AboveRow[-1] per spec, so only one accessor is
+;; needed), per the general "Intra prediction process" section's (08.
+;; decoding.process.md #Intra prediction process) four-case derivation:
+;; haveAbove&&haveLeft -> CurrFrame[y-1][x-1]; haveAbove-only ->
+;; CurrFrame[y-1][x]; haveLeft-only -> CurrFrame[y][x-1]; neither ->
+;; 1<<(BitDepth-1). (Note this is a DIFFERENT formula than AboveRow[i]/
+;; LeftCol[i]'s own have-only-one-neighbor fallback cases above -- those
+;; broadcast a single real sample across the whole row/column, the corner
+;; case here picks a specific single sample per its own case list -- so
+;; above-row-corner below is its own function, not reducible to
+;; above-row-fn/left-col-fn.)
+
+(defn- above-row-corner
+  "AboveRow[-1] (== LeftCol[-1]) per spec 7.11.2's general derivation."
+  [frame frame-w x y have-left? have-above? bit-depth]
+  (cond
+    (and have-above? have-left?) (nth frame (+ (* (dec y) frame-w) (dec x)))
+    have-above? (nth frame (+ (* (dec y) frame-w) x))
+    have-left? (nth frame (+ (* y frame-w) (dec x)))
+    :else (bit-shift-left 1 (dec bit-depth))))
+
+(defn paeth-predict
+  "spec 7.11.2.2 \"Basic intra prediction process\" (PAETH_PRED): for each
+   i=0..h-1, j=0..w-1, base = AboveRow[j] + LeftCol[i] - AboveRow[-1]; pick
+   whichever of LeftCol[i]/AboveRow[j]/AboveRow[-1] is closest to base
+   (ties broken toward LeftCol, then AboveRow[j], per the spec's ordered
+   step list -- transcribed exactly, not just 'closest wins' with an
+   unspecified tiebreak). Same parameter shape as dc-predict/v-predict/
+   h-predict above (including the shared above-row-fn/left-col-fn
+   accessors, whose haveAboveRight/haveBelowLeft-forced-false
+   simplification is exact here too: paeth-predict only ever reads
+   AboveRow[0..w-1]/LeftCol[0..h-1], never the extended w..w+h-1 range, see
+   those helpers' docstrings)."
+  [frame frame-w frame-h x y have-left? have-above? log2W log2H bit-depth]
+  (let [w (bit-shift-left 1 log2W)
+        h (bit-shift-left 1 log2H)
+        ar (above-row-fn frame frame-w x y have-left? have-above? w bit-depth)
+        lc (left-col-fn frame frame-w frame-h x y have-left? have-above? h bit-depth)
+        corner (above-row-corner frame frame-w x y have-left? have-above? bit-depth)]
+    (vec (for [i (range h) j (range w)]
+           (let [above (ar j)
+                 left (lc i)
+                 base (- (+ above left) corner)
+                 p-left (abs (- base left))
+                 p-top (abs (- base above))
+                 p-topleft (abs (- base corner))]
+             (cond
+               (and (<= p-left p-top) (<= p-left p-topleft)) left
+               (<= p-top p-topleft) above
+               :else corner))))))
