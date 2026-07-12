@@ -6,33 +6,49 @@ Named `org-aomedia-av1` (not `org-iso-*`/`org-ietf-*`) because AV1 is
 published by the Alliance for Open Media, not ISO/IEC or the IETF -- see
 `kotoba-lang/org-iso-h264`'s README for the sibling naming rationale.
 
-## Scope (Phase 0 + Phase 1)
+## Scope (Phase 0 + Phase 1, now with real pixel reconstruction)
 
 This is **Phase 0/1** of AV1 support per `com-junkawasaki/root` ADR-2607122000
 (`90-docs/adr/2607122000-utsushi-pixel-codec-r05-cljc-datomic.md`) Migration
-step 9: the foundation layer *before* pixel reconstruction, mirroring how
-`org-iso-h264` started with NAL/SPS/PPS framing before intra pixel decode
-was added. AV1's spec is far larger than H.264's, so per the ADR this repo
-does **not** attempt broad common-code sharing with H.264 -- only
-`codec-primitives`'s narrow generic shapes (`BlockTransform`/`QuantScale`
-protocols, `scan`/`unscan`) are candidates for reuse, and this phase doesn't
-need any of them yet (no transform/quantization-table work has started).
+step 9. Phase 0/1 started as the foundation layer *before* pixel
+reconstruction (OBU/header/bool-decoder/partition-tree framing), mirroring
+how `org-iso-h264` started with NAL/SPS/PPS framing before intra pixel
+decode was added -- **this phase's continuation now adds that pixel
+reconstruction**, at `org-iso-h264`'s equivalent first-pixel-decode
+milestone: real bit-exact luma reconstruction against real encoded data,
+deliberately scoped narrow (see `av1.decode-block`'s namespace docstring for
+the exact boundary: single superblock / single BLOCK_32X32 leaf / TX_32X32 /
+DCT_DCT / DC_PRED / luma-only). AV1's spec is far larger than H.264's, so
+per the ADR this repo does **not** attempt broad common-code sharing with
+H.264 -- only `codec-primitives`'s narrow generic shapes
+(`BlockTransform`/`QuantScale` protocols, `scan`/`unscan`) are candidates
+for reuse; this phase still doesn't lean on them (av1.transform/av1.tables
+implement AV1's own dequant/DCT/scan tables directly, since AV1's are
+structurally different enough from H.264's that a shared abstraction would
+have been leakier than just implementing both natively -- see
+`codec-primitives`'s README for the same conclusion reached from the H.264
+side).
 
 Implemented, transcribed field-for-field from the spec (not reconstructed
 from memory -- see each namespace's docstring for the exact spec section
 and source snapshot used: `AOMediaCodec/av1-spec` master,
 `06.bitstream.syntax.md`/`07.bitstream.semantics.md`/`08.decoding.process.md`/
 `09.parsing.process.md`/`10.additional.tables.md`/`04.conventions.md`,
-fetched 2026-07-12):
+fetched 2026-07-12 for the framing namespaces, 2026-07-13 for the pixel-
+reconstruction namespaces added below):
 
 | ns | role |
 |---|---|
 | `av1.bitreader` | MSB-first bit reader + descriptor primitives: `f(n)`, `uvlc()`, `le(n)`, `leb128()`, `su(n)`, `ns(n)`, `byte_alignment()`, `skip-bits` (position-only advance, for `exit_symbol()`) |
 | `av1.obu` | `obu_header()` / `obu_extension_header()` / the top-level OBU loop -- every OBU is self-delimiting via `leb128 obu_size`, so unparsed payload can always be skipped byte-exactly to the next OBU |
 | `av1.sequence-header` | full `sequence_header_obu()`: profile/still-picture/timing-info/decoder-model-info/operating-points/frame dimensions/`color_config()` |
-| `av1.frame-header` | **the full `uncompressed_header()`**, intra frames only (`KEY_FRAME`/`INTRA_ONLY_FRAME`): frame_type/show_frame/showable_frame, frame size (`frame_size()`/`superres_params()`/`render_size()`), `tile_info()`, `quantization_params()`, `segmentation_params()`, `delta_q_params()`/`delta_lf_params()`, the `CodedLossless`/`AllLossless` computation, `loop_filter_params()`, `cdef_params()`, `lr_params()`, `read_tx_mode()`, `frame_reference_mode()`/`skip_mode_params()`/`global_motion_params()` (all zero-bit passthroughs since FrameIsIntra is always 1 in this phase's scope), `reduced_tx_set`, and `film_grain_params()` |
+| `av1.frame-header` | **the full `uncompressed_header()`**, intra frames only (`KEY_FRAME`/`INTRA_ONLY_FRAME`): frame_type/show_frame/showable_frame, frame size (`frame_size()`/`superres_params()`/`render_size()`), `tile_info()`, `quantization_params()`, `segmentation_params()`, `delta_q_params()`/`delta_lf_params()`, the `CodedLossless`/`AllLossless` computation, `loop_filter_params()`, `cdef_params()`, `lr_params()`, `read_tx_mode()`, `frame_reference_mode()`/`skip_mode_params()`/`global_motion_params()` (all zero-bit passthroughs since FrameIsIntra is always 1 in this phase's scope), `reduced_tx_set`, and `film_grain_params()`. Also now carries `use-128x128-superblock`/`mono-chrome`/`num-planes`/`subsampling-x`/`subsampling-y` through to the top-level returned map (bugfix, see below) |
 | `av1.bool-decoder` | the AV1 "Symbol decoder" (daala-derived non-binary arithmetic coder, spec 8.2): `init_symbol`/`read_bool`/`read_literal`/`read_symbol`/`exit_symbol` with CDF adaptation. Wholly separate implementation from H.264's CAVLC/CABAC (`h264.cavlc`) -- different coding scheme entirely |
-| `av1.tile-group` | `tile_group_obu()`'s entry (tile start/end, per-tile `init_symbol`/`exit_symbol`) + `decode_partition()` (spec 5.11.4) fully implemented: real default CDF tables (`Default_Partition_W8/W16/W32/W64/W128_Cdf`), real `partition`/`split_or_horz`/`split_or_vert` context derivation (AvailU/AvailL via a MiSizes grid this namespace maintains), real bool-decoder symbol reads -- down to every leaf partition. `decode_block()` (mode info/residual/coefficient decode) is explicitly NOT called; see the namespace docstring's correctness caveat about what's bit-exact and what isn't once a leaf is reached |
+| `av1.tile-group` | `tile_group_obu()`'s entry (tile start/end, per-tile `init_symbol`/`exit_symbol`) + `decode_partition()` (spec 5.11.4) fully implemented: real default CDF tables (`Default_Partition_W8/W16/W32/W64/W128_Cdf`), real `partition`/`split_or_horz`/`split_or_vert` context derivation (AvailU/AvailL via a MiSizes grid this namespace maintains), real bool-decoder symbol reads -- down to every leaf partition. `decode_block()` is now called at every leaf **when the caller supplies** an injectable `:decode-block-fn` (see `av1.decode-block` below) -- existing callers that don't supply one keep the original "leaf recorded, no further bits consumed" behavior this namespace has always documented |
+| `av1.tables` | AV1 constant tables for coefficient decode/dequant/inverse transform/DC prediction: `Dc-Qlookup-8bit`/`Ac-Qlookup-8bit` (8-bit dequant lookup), `Cos128-Lookup`, `Default-Scan-32x32`, and the `Default_*_Cdf` tables (`Skip`/`Intra-Frame-Y-Mode`/`Txb-Skip`/`Eob-Pt-1024`/`Eob-Extra`/`Dc-Sign`/`Coeff-Base-Eob`/`Coeff-Base`/`Coeff-Br`) sliced to this phase's supported scope (TX_32X32 only, luma only -- see namespace docstring) |
+| `av1.transform` | dequantization (`dequantize`) + the AV1 inverse DCT (`inverse-dct!`, spec 7.13.2.3's generic butterfly-network algorithm, transcribed in full for n=2..6/TX_4X4..TX_64X64 even though only n=5/TX_32X32 is exercised against real data) + the 2D inverse transform process (`inverse-transform-2d`, row transform -> clip -> column transform) |
+| `av1.intra-pred` | DC intra prediction (`dc-predict`, spec 7.11.2.5) -- all four haveLeft/haveAbove cases implemented, though this phase's only validated block (the first/only block in the frame) exercises just the "neither available" (flat 1<<(BitDepth-1)) case |
+| `av1.decode-block` | **decode_block()** (spec 5.11.5) for this phase's narrow validated scope: `intra_frame_mode_info()` (`read_skip`/`read_cdef`/`intra_frame_y_mode`/`filter_intra_mode_info`'s conditional guard), `read_block_tx_size()`, `residual()`/`transform_block()`/`coeffs()` (all_zero/transform_type/eob_pt_1024/eob_extra/coeff_base/coeff_base_eob/coeff_br/dc_sign/sign_bit/golomb, with real per-context CDF persistence+adaptation), and reconstruction (predict_intra + dequantize + inverse_transform_2d + clip). See its namespace docstring for the exact scope boundary and why each boundary was chosen (frame-level `guard-frame-scope!` throws for out-of-scope streams) |
 
 **Explicitly NOT implemented (next phase)**: inter frames (`frame_type ==
 INTER_FRAME`) and `show_existing_frame == 1` (both need cross-frame
@@ -45,14 +61,19 @@ when `frame-is-intra?`, but throws rather than silently mis-parsing if that
 invariant is ever violated), `temporal_point_info()` (needs
 `frame_presentation_time_length_minus_1` plumbing not carried; throws if a
 stream's `decoder_model_info_present_flag && !equal_picture_interval` would
-require it), `decode_block()` and everything downstream of it (mode info,
-residual, coefficients, DCT/ADST transform kernels, intra prediction, actual
-loop-filter/CDEF/loop-restoration pixel processing, film grain synthesis).
-`decode_partition()`'s recursive partition-tree structure IS implemented
-(see `av1.tile-group` above), but only bit-exact up to the first leaf
-partition per superblock, since nothing after that point calls
-`decode_block()`. All of the above is real pixel reconstruction, deliberately
-out of scope for this phase.
+require it). `decode_partition()`'s recursive partition-tree structure IS
+bit-exact all the way through `decode_block()` now (when `av1.decode-block`
+is wired in as the `:decode-block-fn`), but **only** for the narrow shape
+`av1.decode-block`'s namespace docstring specifies -- ADST/FLIPADST/IDTX
+transform types, any intra mode other than DC_PRED, any transform size
+other than TX_32X32, chroma planes, segmentation/delta-Q/delta-LF/
+screen-content-tools/intra-BC, and multi-leaf/multi-block frames are all
+explicitly out of scope and throw `ex-info` rather than silently
+mis-decoding. Inter prediction, loop-filter/CDEF/loop-restoration in-loop
+filtering, and film grain synthesis remain fully unimplemented (this
+phase's fixtures disable all in-loop filtering at the encoder, so the raw
+reconstruction this phase produces already matches the reference decoder's
+output without needing to implement any of them -- see Validation below).
 
 ## Validation
 
@@ -121,6 +142,63 @@ against two more real SVT-AV1-encoded streams:
   the first leaf partition is not bit-exact against the real stream; see
   `av1.tile-group`'s namespace docstring for why).
 
+### Pixel reconstruction (`av1.decode-block`, `av1.tables`, `av1.transform`, `av1.intra-pred`)
+
+`av1.decode-block-test` validates the full decode_block() pipeline --
+mode_info, read_block_tx_size, coeffs() (CDF-adapted coefficient decode),
+dequantization, inverse DCT, DC prediction, reconstruction -- against TWO
+REAL **aomenc** (libaom 3.14.1)-encoded 32x32 monochrome keyframes,
+comparing this repo's reconstructed luma plane against **`dav1d`'s
+independent decode of the same bitstream, bit-exactly (no tolerance)**:
+
+- `keyframe-32x32-gradient.obu`: a smooth two-axis brightness ramp (base
+  128 +/- 20 across x, +/- 4 across y, authored as known raw pixel bytes --
+  not a lavfi filter -- so the exact input is reproducible). eob=7 (few
+  nonzero coefficients).
+- `keyframe-32x32-busy.obu`: a busier two-axis sinusoidal-plus-ramp
+  pattern, same encoder scope restrictions, eob=67 -- exercises far more of
+  the coefficient-context derivation and per-context CDF adaptation within
+  the same single TX_32X32 transform block.
+
+Both were encoded with every non-DC_PRED intra mode, every non-NONE/SPLIT
+partition type, CDEF/loop-filter/loop-restoration, and TX_MODE_SELECT
+disabled at the encoder, so DC_PRED and TX_32X32/PARTITION_NONE are the
+**only options the bitstream could contain** -- not merely the likely
+outcome for smooth content (see `av1.decode-block`'s namespace docstring
+for why TX_32X32 is also the one size for which `transform_type()` is
+*structurally* forced to DCT_DCT, zero bits, by `get_tx_set()`):
+
+```sh
+aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \
+  --monochrome --enable-cdef=0 --enable-restoration=0 --loopfilter-control=0 \
+  --enable-filter-intra=0 --enable-smooth-intra=0 --enable-paeth-intra=0 \
+  --enable-directional-intra=0 --enable-angle-delta=0 --enable-intrabc=0 \
+  --enable-palette=0 --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \
+  --enable-rect-partitions=0 --enable-ab-partitions=0 --enable-1to4-partitions=0 \
+  --enable-tx-size-search=0 --tile-columns=0 --tile-rows=0 \
+  --kf-min-dist=1 --kf-max-dist=1 \
+  --obu -o keyframe-32x32-gradient.obu keyframe-32x32-gradient.y4m
+
+dav1d -i keyframe-32x32-gradient.obu -o keyframe-32x32-gradient.dav1d.yuv
+```
+
+(aomenc/libaom 3.14.1, dav1d 1.5.3, both from Homebrew, generated
+2026-07-13; both `.obu` and the corresponding `.dav1d.yuv` golden output
+are checked in under `resources/av1/fixtures/` -- see
+`test/av1/fixtures.clj` docstrings for exactly how each was produced).
+`av1.decode-block-test` additionally checks that the frame really did
+decode to the expected single BLOCK_32X32/PARTITION_NONE/TX_32X32 leaf
+shape (not merely that it happened not to throw), and a third test
+(`guard-frame-scope-throws-test`) confirms out-of-scope frame headers
+(lossless, non-monochrome, non-TX_MODE_LARGEST) are rejected with
+`ex-info` rather than silently mis-decoded.
+
+Not yet exercised against real data (see the "Explicitly NOT implemented"
+list above): any block shape other than this single validated one --
+multiple leaves/superblocks, any intra mode other than DC_PRED, any
+transform size other than TX_32X32, ADST/IDTX/FLIPADST transform types,
+chroma planes, and inter prediction.
+
 ## Usage
 
 ```clojure
@@ -145,6 +223,23 @@ against two more real SVT-AV1-encoded streams:
 (def result (tg/parse-frame-obu frame-obu seq-hdr))
 ;; => {:frame-header {...} :tile-group {:tg-start ... :tg-end ...
 ;;     :tiles [{:tile-row ... :tile-col ... :superblock-partitions [...]}]}}
+```
+
+To also get real reconstructed pixels (this phase's narrow scope --
+single BLOCK_32X32/PARTITION_NONE/TX_32X32/DCT_DCT/DC_PRED/luma leaf, see
+`av1.decode-block`'s namespace docstring), supply its `:decode-block-fn`:
+
+```clojure
+(require '[av1.decode-block :as db])
+
+(def decode-block-fn (db/make-decode-block-fn frame-hdr seq-hdr))
+;; throws ex-info immediately if frame-hdr/seq-hdr are out of scope
+
+(def result (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn}))
+(def tile (first (:tiles (:tile-group result))))
+(def luma-plane (:luma-plane (:final-tile-state tile)))
+;; => flat row-major (MiCols*4) x (MiRows*4) vector of reconstructed 8-bit
+;;    luma samples
 ```
 
 ## Test

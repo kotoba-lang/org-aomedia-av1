@@ -58,3 +58,70 @@
    (ffmpeg 8.1.1 / libsvtav1, generated 2026-07-12)."
   []
   (load-resource "av1/fixtures/keyframe-32x32-split.obu"))
+
+(defn keyframe-32x32-gradient-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 32x32 MONOCHROME keyframe, Phase 1
+   pixel-reconstruction milestone fixture (ADR-2607122000 Migration step 9;
+   see av1.decode-block namespace docstring for the exact narrow scope this
+   validates against). Content is a smooth two-axis brightness ramp
+   (base 128 +/- 20 across x, +/- 4 across y -- authored directly as raw
+   8-bit gray pixel bytes wrapped in a minimal y4m header, not via
+   `testsrc`/`testsrc2`, so the exact pixel values are known and
+   reproducible independent of any lavfi filter version).
+
+   The aomenc invocation deliberately disables every intra tool other than
+   DC_PRED (so DC_PRED is the ONLY mode the bitstream could have chosen,
+   not merely the most likely one -- see namespace docstring), CDEF/loop
+   filter/restoration (so no in-loop filtering needs to be modeled), and
+   every non-NONE/SPLIT partition type (so decode_partition()'s recursion
+   stays exactly the shape av1.tile-group/av1.decode-block support):
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=0 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-32x32-gradient.obu keyframe-32x32-gradient.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-32x32-gradient.obu -o
+   keyframe-32x32-gradient.dav1d.yuv` (dav1d 1.5.3, a completely
+   independent AV1 decoder implementation) produced the raw 8-bit gray
+   32x32 luma plane checked in as `keyframe-32x32-gradient.dav1d.yuv` --
+   see `keyframe-32x32-gradient-golden-yuv` below and
+   test/av1/decode_block_test.clj for the bit-exact comparison against
+   this repo's decoder."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-gradient.obu"))
+
+(defn keyframe-32x32-gradient-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-32x32-gradient-bytes` (1024
+   bytes, row-major 32x32) -- the independent ground truth
+   test/av1/decode_block_test.clj compares this repo's decoder output
+   against."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-gradient.dav1d.yuv"))
+
+(defn keyframe-32x32-busy-bytes
+  "Same aomenc invocation/scope restrictions as
+   `keyframe-32x32-gradient-bytes` (see its docstring), but with a busier
+   two-axis sinusoidal-plus-ramp brightness pattern (still authored as
+   known raw pixel bytes, not via a lavfi filter) so the encoder actually
+   emits many more nonzero coefficients (eob=67, vs. 7 for the plain
+   gradient fixture) -- exercises far more of av1.decode-block's
+   coeff_base/coeff_base_eob/coeff_br context derivation and per-context
+   CDF adaptation within a single transform block than the smoother
+   gradient fixture does. Generated 2026-07-13 the same way (aomenc 3.14.1
+   / dav1d 1.5.3 cross-check)."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-busy.obu"))
+
+(defn keyframe-32x32-busy-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-32x32-busy-bytes` -- see
+   `keyframe-32x32-gradient-golden-yuv` docstring for the same pattern."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-busy.dav1d.yuv"))

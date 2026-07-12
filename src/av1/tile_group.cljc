@@ -272,9 +272,32 @@
             [{:r r :c c :b-size bsize :partition partition :sub-size sub-size
               :children [c1 c2 c3 c4]}
              s4])
-          (let [state2 (set-mi-sizes state1 r c bsize sub-size)]
-            [{:r r :c c :b-size bsize :partition partition :sub-size sub-size :leaf true}
-             state2]))))))
+          (let [state2 (set-mi-sizes state1 r c bsize sub-size)
+                leaf-node {:r r :c c :b-size bsize :partition partition :sub-size sub-size :leaf true}]
+            ;; Phase 1 pixel-reconstruction continuation (ADR-2607122000
+            ;; Migration step 9): the spec's decode_partition() always calls
+            ;; decode_block() at every leaf (see #Decode partition syntax) --
+            ;; this was intentionally NOT done here in Phase 0/1's first cut
+            ;; (see namespace docstring's correctness caveat), but now that
+            ;; av1.decode-block implements decode_block() for this repo's
+            ;; narrow validated scope (single DC_PRED/TX_32X32/DCT_DCT leaf),
+            ;; an injectable `:decode-block-fn` callback lets callers opt in
+            ;; without disturbing existing callers/tests that don't set it
+            ;; (those keep the pre-existing "leaf recorded, no bits consumed
+            ;; past this point" behavior this namespace has always
+            ;; documented). Contract:
+            ;; `(decode-block-fn state r c mi-size avail-u? avail-l?)` ->
+            ;; `[block-result state']`; `block-result` (opaque to this
+            ;; namespace) is merged into the leaf node under `:decode-block`.
+            ;; avail-u?/avail-l? are passed through rather than recomputed by
+            ;; the callback, since decode_block()'s `AvailU`/`AvailL`
+            ;; (spec #Decode block syntax: `is_inside(r-1,c)`/`is_inside(r,c-1)`)
+            ;; are exactly this leaf's own avail-u?/avail-l? already computed
+            ;; above for the partition-symbol context.
+            (if-let [decode-block-fn (:decode-block-fn state2)]
+              (let [[block-result state3] (decode-block-fn state2 r c sub-size avail-u? avail-l?)]
+                [(assoc leaf-node :decode-block block-result) state3])
+              [leaf-node state2])))))))
 
 ;; -- tile_group_obu() -- spec #General tile group OBU syntax / #Decode tile syntax.
 
@@ -290,8 +313,14 @@
    tg_end=NumTiles-1). Per tile: init_symbol/decode-partition-over-superblocks
    /exit_symbol (spec #Decode tile syntax's SB raster loop, minus
    clear_cdef()/read_lr()/decode_block() -- all out of scope, see namespace
-   docstring)."
-  [reader sz frame-hdr]
+   docstring).
+
+   `opts` (optional, default `{}`) supports `:decode-block-fn` -- see
+   `decode-partition`'s docstring for the callback contract. Threaded
+   through to every tile's initial state so av1.decode-block's decode_block()
+   implementation gets called at every leaf when supplied."
+  ([reader sz frame-hdr] (parse-tile-group-obu reader sz frame-hdr {}))
+  ([reader sz frame-hdr opts]
   (let [{:keys [tile-cols tile-cols-log2 tile-rows-log2 tile-size-bytes
                 mi-col-starts mi-row-starts]} (:tile-info frame-hdr)
         nt (num-tiles frame-hdr)
@@ -327,11 +356,12 @@
               mi-col-start (nth mi-col-starts tile-col)
               mi-col-end (nth mi-col-starts (inc tile-col))
               bd0 (bd/init-symbol r' tile-size)
-              tile-state0 {:bd bd0 :partition-cdfs {} :mi-sizes {}
-                           :mi-rows (:mi-rows frame-hdr) :mi-cols (:mi-cols frame-hdr)
-                           :mi-row-start mi-row-start :mi-row-end mi-row-end
-                           :mi-col-start mi-col-start :mi-col-end mi-col-end
-                           :cdf-adapt? cdf-adapt?}
+              tile-state0 (cond-> {:bd bd0 :partition-cdfs {} :mi-sizes {}
+                                    :mi-rows (:mi-rows frame-hdr) :mi-cols (:mi-cols frame-hdr)
+                                    :mi-row-start mi-row-start :mi-row-end mi-row-end
+                                    :mi-col-start mi-col-start :mi-col-end mi-col-end
+                                    :cdf-adapt? cdf-adapt?}
+                             (:decode-block-fn opts) (assoc :decode-block-fn (:decode-block-fn opts)))
               [sb-partitions tile-state']
               (loop [rr mi-row-start, state tile-state0, sbs []]
                 (if (>= rr mi-row-end)
@@ -348,15 +378,27 @@
                  (conj acc {:tile-row tile-row :tile-col tile-col :tile-size tile-size
                             :mi-row-start mi-row-start :mi-row-end mi-row-end
                             :mi-col-start mi-col-start :mi-col-end mi-col-end
-                            :superblock-partitions sb-partitions})))))))
+                            :superblock-partitions sb-partitions
+                            ;; Phase 1 pixel-reconstruction continuation
+                            ;; (ADR-2607122000 Migration step 9): the final
+                            ;; per-tile state (minus :bd, which is only
+                            ;; meaningful mid-parse) is exposed so a caller
+                            ;; supplying :decode-block-fn can pull out
+                            ;; whatever it accumulated there (e.g.
+                            ;; av1.decode-block's :luma-plane reconstructed
+                            ;; pixel buffer) -- opaque to this namespace.
+                            :final-tile-state (dissoc tile-state' :bd)}))))))))
 
 (defn parse-frame-obu
   "spec #Frame OBU syntax (`frame_obu(sz)`), for a combined OBU_FRAME: parses
    frame_header_obu() (av1.frame-header/parse) then byte_alignment() then
    tile_group_obu(sz) with sz reduced by the header's byte length. `obu` is
    an entry from av1.obu/parse-obu (:reader-at-payload + :obu-size);
-   `seq-hdr` is the active sequence header (av1.sequence-header/parse)."
-  [obu seq-hdr]
+   `seq-hdr` is the active sequence header (av1.sequence-header/parse).
+   `opts` (optional) forwarded to `parse-tile-group-obu` -- see its
+   docstring for `:decode-block-fn`."
+  ([obu seq-hdr] (parse-frame-obu obu seq-hdr {}))
+  ([obu seq-hdr opts]
   (let [start-reader (:reader-at-payload obu)
         start-byte (br/byte-pos start-reader)
         frame-hdr (fh/parse start-reader seq-hdr)
@@ -364,7 +406,7 @@
         header-bytes (- (br/byte-pos aligned-reader) start-byte)
         sz (- (:obu-size obu) header-bytes)]
     {:frame-header frame-hdr
-     :tile-group (parse-tile-group-obu aligned-reader sz frame-hdr)}))
+     :tile-group (parse-tile-group-obu aligned-reader sz frame-hdr opts)})))
 
 (defn parse-standalone-tile-group-obu
   "For the standalone OBU_TILE_GROUP case (a preceding, separate
