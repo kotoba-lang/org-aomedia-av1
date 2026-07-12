@@ -48,36 +48,43 @@
        than merely likely for smooth content -- the most robust possible
        scope boundary for a phase that explicitly excludes ADST/IDTX/
        FLIPADST;
-     - exactly FOUR luma intra prediction modes are supported: DC_PRED,
+     - exactly FIVE luma intra prediction modes are supported: DC_PRED,
        V_PRED, H_PRED, PAETH_PRED (added by the PAETH mode-coverage
        extension, ADR-2607122000 Migration step 9 continuation -- see
-       av1.intra-pred/paeth-predict). Every other `intra_frame_y_mode` (D45/
-       D135/D113/D157/D203/D67/SMOOTH*) still throws (the CDF *read* itself
-       is real and correct for all 13 modes -- see `read-y-mode` -- only the
-       *result* is restricted to these four). PAETH_PRED is NOT a
-       directional mode (is_directional_mode(PAETH_PRED) is false, spec
-       08.decoding.process.md's mode dispatch routes it to the \"basic
-       intra prediction process\" 7.11.2.2, not the directional process
-       7.11.2.4 that V_PRED/H_PRED use) -- so `read-angle-delta-y` already
-       correctly reads NO angle_delta_y bit for a PAETH_PRED block (its
+       av1.intra-pred/paeth-predict), and SMOOTH_PRED (added by the SMOOTH
+       mode-coverage extension, same Migration step 9 continuation -- see
+       av1.intra-pred/smooth-predict). Every other `intra_frame_y_mode`
+       (D45/D135/D113/D157/D203/D67/SMOOTH_V_PRED/SMOOTH_H_PRED) still
+       throws (the CDF *read* itself is real and correct for all 13 modes
+       -- see `read-y-mode` -- only the *result* is restricted to these
+       five). Neither PAETH_PRED nor SMOOTH_PRED is a directional mode
+       (is_directional_mode(PAETH_PRED) and is_directional_mode(
+       SMOOTH_PRED) are both false; spec 08.decoding.process.md's mode
+       dispatch routes PAETH_PRED to the \"basic intra prediction process\"
+       7.11.2.2 and SMOOTH_PRED to the \"smooth intra prediction process\"
+       7.11.2.6, neither is the directional process 7.11.2.4 that V_PRED/
+       H_PRED use) -- so `read-angle-delta-y` already correctly reads NO
+       angle_delta_y bit for either a PAETH_PRED or SMOOTH_PRED block (its
        existing `(contains? #{V_PRED H_PRED} y-mode)` gate already excludes
-       PAETH_PRED, no code change needed there), and PAETH_PRED needed no
-       edge-filter/upsample/angle reasoning at all, unlike the V_PRED/
-       H_PRED extension. `read-y-mode`'s neighbor-context lookup
-       (`tables/Intra-Mode-Context`) was widened from a DC/V/H-only 3-entry
-       slice to the full 13-entry spec table so a PAETH_PRED neighbor can be
-       looked up too -- `Intra_Mode_Context[PAETH_PRED(=12)] == 0`, IDENTICAL
-       to `Intra_Mode_Context[DC_PRED(=0)]`, so this widening introduces no
-       new reachable (abovemode,leftmode) ctx pair beyond the existing
-       (0,0)-only support (spot-checked against the spec's own table, not
-       assumed -- see av1.tables namespace comments). Chroma + PAETH_PRED
-       luma is explicitly OUT of scope: `read-uv-mode`'s cdf-row table
+       both, no code change needed there for either extension), and
+       SMOOTH_PRED (like PAETH_PRED) needed no edge-filter/upsample/angle
+       reasoning at all, unlike the V_PRED/H_PRED extension. `read-y-mode`'s
+       neighbor-context lookup (`tables/Intra-Mode-Context`) was already
+       widened to the full 13-entry spec table by the PAETH extension, so
+       no further widening was needed for SMOOTH_PRED -- `Intra_Mode_Context[
+       SMOOTH_PRED(=9)] == 0`, IDENTICAL to `Intra_Mode_Context[DC_PRED(=0)]`
+       (and to `Intra_Mode_Context[PAETH_PRED(=12)]`), so a SMOOTH_PRED
+       neighbor introduces no new reachable (abovemode,leftmode) ctx pair
+       beyond the existing (0,0)-only support either (spot-checked against
+       the spec's own table, not assumed -- see av1.tables namespace
+       comments). Chroma + PAETH_PRED/SMOOTH_PRED luma is explicitly OUT of
+       scope: `read-uv-mode`'s cdf-row table
        (`Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H`) only has the DC/V/H rows
        transcribed, so `read-uv-mode` now throws `ex-info` up front
        (`:reason :unsupported-y-mode-for-uv-mode-ctx`) if the block's YMode
-       is ever PAETH_PRED and the frame is color, rather than letting an
-       out-of-range `nth` crash uncontrolled -- this extension's own
-       validation fixture is monochrome, so this guard is unexercised
+       is ever PAETH_PRED or SMOOTH_PRED and the frame is color, rather than
+       letting an out-of-range `nth` crash uncontrolled -- both extensions'
+       own validation fixtures are monochrome, so this guard is unexercised
        against real data (documented, not silently assumed safe);
      - CHROMA (Cb/Cr) DECODE, this phase's continuation (ADR-2607122000
        Migration step 9, chroma extension): 4:2:0 only (subsampling_x=1,
@@ -196,6 +203,7 @@
 (def DC_PRED 0)
 (def V_PRED 1)
 (def H_PRED 2)
+(def SMOOTH_PRED 9)
 (def PAETH_PRED 12)
 (def DCT_DCT 0)
 (def UV_DC_PRED 0)
@@ -291,7 +299,10 @@
 ;; `Intra_Mode_Context[PAETH_PRED(=12)] == 0`, identical to
 ;; `Intra_Mode_Context[DC_PRED(=0)]`, so this widening is exact and
 ;; introduces no new reachable ctx pair -- see namespace docstring's PAETH
-;; section).
+;; section). SMOOTH extension: `Intra_Mode_Context[SMOOTH_PRED(=9)] == 0`
+;; too (same full 13-entry table, already transcribed for the PAETH
+;; extension -- no further widening needed here), so a neighbor decoding
+;; to SMOOTH_PRED introduces no new reachable ctx pair either.
 
 (defn- read-y-mode [state row col avail-u? avail-l?]
   (let [neighbor-mode (fn [avail? r c] (if avail? (get (:y-modes state) [r c] DC_PRED) DC_PRED))
@@ -303,8 +314,8 @@
       (throw (ex-info "av1.decode-block: out of scope: intra_frame_y_mode ctx != (0,0) (only Default_Intra_Frame_Y_Mode_Cdf[0][0] is transcribed)"
                        {:reason :unsupported-y-mode-ctx :ctx ctx})))
     (let [[sym state'] (read-cdf-symbol state :y-mode-cdf [0 0] tables/Default-Intra-Frame-Y-Mode-Cdf-0-0)]
-      (when (not (contains? #{DC_PRED V_PRED H_PRED PAETH_PRED} sym))
-        (throw (ex-info "av1.decode-block: out of scope: intra_frame_y_mode not in {DC_PRED,V_PRED,H_PRED,PAETH_PRED}"
+      (when (not (contains? #{DC_PRED V_PRED H_PRED SMOOTH_PRED PAETH_PRED} sym))
+        (throw (ex-info "av1.decode-block: out of scope: intra_frame_y_mode not in {DC_PRED,V_PRED,H_PRED,SMOOTH_PRED,PAETH_PRED}"
                          {:reason :unsupported-intra-mode :y-mode sym})))
       [sym state'])))
 
@@ -329,10 +340,15 @@
 ;; scope for this extension, see namespace docstring's PAETH section) -- so
 ;; this throws explicitly up front rather than letting `nth` crash
 ;; uncontrolled on an out-of-range ctx.
+;;
+;; SMOOTH extension scope note: same reasoning applies to SMOOTH_PRED(9) --
+;; TileUVModeCflAllowedCdf[9] is not transcribed either, so chroma+
+;; SMOOTH_PRED luma is unsupported too (this extension's own validation
+;; fixture is monochrome, same as the PAETH extension's).
 
 (defn- read-uv-mode [state y-mode]
   (when (not (contains? #{DC_PRED V_PRED H_PRED} y-mode))
-    (throw (ex-info "av1.decode-block: out of scope: uv_mode ctx (YMode) not in {DC_PRED,V_PRED,H_PRED} -- chroma+PAETH_PRED luma is unsupported (no TileUVModeCflAllowedCdf[PAETH_PRED] transcribed)"
+    (throw (ex-info "av1.decode-block: out of scope: uv_mode ctx (YMode) not in {DC_PRED,V_PRED,H_PRED} -- chroma+PAETH_PRED/SMOOTH_PRED luma is unsupported (no TileUVModeCflAllowedCdf[PAETH_PRED/SMOOTH_PRED] transcribed)"
                      {:reason :unsupported-y-mode-for-uv-mode-ctx :y-mode y-mode})))
   (let [[sym state'] (read-cdf-symbol state :uv-mode-cdf y-mode
                                        (nth tables/Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H y-mode))]
@@ -847,16 +863,18 @@
 
 (defn- predict-intra
   "Dispatches to av1.intra-pred's dc-predict/v-predict/h-predict/
-   paeth-predict by `mode` -- all four share the same parameter shape (see
-   av1.intra-pred namespace docstring). `mode` is the block's YMode for
-   plane 0, or its (always UV_DC_PRED/0) UVMode for plane>0 (so mode 12
-   (PAETH_PRED) is only ever reached for plane 0, see read-uv-mode's
-   PAETH-extension scope note above)."
+   smooth-predict/paeth-predict by `mode` -- all five share the same
+   parameter shape (see av1.intra-pred namespace docstring). `mode` is the
+   block's YMode for plane 0, or its (always UV_DC_PRED/0) UVMode for
+   plane>0 (so mode 9 (SMOOTH_PRED) and mode 12 (PAETH_PRED) are only ever
+   reached for plane 0, see read-uv-mode's PAETH/SMOOTH-extension scope
+   notes above)."
   [mode plane0 frame-w frame-h x y have-left? have-above? log2W log2H bit-depth]
   (case (long mode)
     0 (pred/dc-predict plane0 frame-w frame-h x y have-left? have-above? log2W log2H bit-depth)
     1 (pred/v-predict plane0 frame-w frame-h x y have-left? have-above? log2W log2H bit-depth)
     2 (pred/h-predict plane0 frame-w frame-h x y have-left? have-above? log2W log2H bit-depth)
+    9 (pred/smooth-predict plane0 frame-w frame-h x y have-left? have-above? log2W log2H bit-depth)
     12 (pred/paeth-predict plane0 frame-w frame-h x y have-left? have-above? log2W log2H bit-depth)))
 
 (defn- write-block [plane frame-w x y w h values]
