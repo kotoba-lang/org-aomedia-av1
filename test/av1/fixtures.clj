@@ -230,6 +230,80 @@
   []
   (load-resource "av1/fixtures/keyframe-64x64-hpred.dav1d.yuv"))
 
+(defn keyframe-32x32-color-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 32x32 4:2:0 COLOR keyframe (Cb/Cr
+   both real, non-flat data -- NOT `--monochrome`), the chroma-decode
+   extension fixture (ADR-2607122000 Migration step 9 continuation -- adds
+   chroma (Cb/Cr) decode to av1.decode-block's originally luma-only scope).
+   Same aomenc scope restrictions as `keyframe-32x32-gradient-bytes` (see
+   its docstring) PLUS `--enable-cfl-intra=0` (so UV_CFL_PRED can never be
+   the encoder's choice -- combined with the pre-existing
+   `--enable-smooth-intra=0 --enable-paeth-intra=0
+   --enable-directional-intra=0`, which also gate the corresponding UV
+   modes, DC_PRED/UV_DC_PRED are structurally the only modes left for the
+   encoder to choose for both luma AND chroma, not merely the likely
+   outcome for smooth content).
+
+   Content is authored directly as known raw 8-bit I420 pixel bytes (not a
+   lavfi filter): luma is the same 32x32 two-axis brightness-ramp family as
+   `keyframe-32x32-gradient-bytes` (base 128, +/-20 across x, +/-4 across
+   y); Cb is a 16x16 ramp across x (base 100, +/-24); Cr is a 16x16 ramp
+   across y (base 160, +/-18) -- three genuinely DIFFERENT profiles per
+   plane, so a bug that mixed up plane buffers/deltas/cdf tables would
+   produce a wrong (not merely coincidentally-right) reconstruction.
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --enable-cdef=0 --enable-restoration=0 --loopfilter-control=0 \\
+       --enable-filter-intra=0 --enable-smooth-intra=0 --enable-paeth-intra=0 \\
+       --enable-directional-intra=0 --enable-angle-delta=0 --enable-intrabc=0 \\
+       --enable-palette=0 --enable-cfl-intra=0 --enable-qm=0 --enable-tx64=0 \\
+       --enable-rect-tx=0 --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-32x32-color.obu keyframe-32x32-color.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-32x32-color.obu -o
+   keyframe-32x32-color.dav1d.yuv` (dav1d 1.5.3, a completely independent
+   AV1 decoder) produced the raw 8-bit I420 planes (1024 Y + 256 U + 256 V
+   bytes) checked in as `keyframe-32x32-color.dav1d.yuv` -- see
+   `keyframe-32x32-color-golden-yuv` below and test/av1/decode_block_test.clj
+   for the bit-exact comparison against this repo's decoder (all three
+   planes). Empirically confirmed (not merely by construction): single
+   BLOCK_32X32/PARTITION_NONE leaf, YMode=DC_PRED, UVMode=UV_DC_PRED,
+   eob=16 (luma) / 7 (U) / 10 (V) -- real, nontrivial (not all-zero)
+   coefficient counts on all three planes."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-color.obu"))
+
+(defn keyframe-32x32-color-golden-yuv
+  "dav1d's raw 8-bit I420 decode of `keyframe-32x32-color-bytes` (1536
+   bytes: 1024 Y + 256 U + 256 V, row-major each plane) -- the independent
+   ground truth test/av1/decode_block_test.clj compares this repo's
+   decoder output against, split per-plane."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-color.dav1d.yuv"))
+
+(defn keyframe-32x32-color-busy-bytes
+  "Same aomenc invocation/scope restrictions as `keyframe-32x32-color-bytes`
+   (see its docstring), but with busier sinusoidal-plus-ramp content on all
+   three planes (still authored as known raw pixel bytes, not a lavfi
+   filter, and each plane uses a DIFFERENT frequency/phase so the three
+   planes' coefficient patterns are genuinely distinct) -- exercises far
+   more of av1.decode-block's coeff_base/coeff_base_eob/coeff_br context
+   derivation and per-context CDF adaptation for the chroma planes than the
+   smoother `keyframe-32x32-color-bytes` fixture does (eob=190 luma / 66 U
+   / 105 V, vs. 16/7/10). Generated 2026-07-13 the same way (aomenc
+   3.14.1 / dav1d 1.5.3 cross-check)."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-color-busy.obu"))
+
+(defn keyframe-32x32-color-busy-golden-yuv
+  "dav1d's raw 8-bit I420 decode of `keyframe-32x32-color-busy-bytes` --
+   see `keyframe-32x32-color-golden-yuv` docstring for the same pattern."
+  []
+  (load-resource "av1/fixtures/keyframe-32x32-color-busy.dav1d.yuv"))
+
 (defn keyframe-64x64-split16-bytes
   "A REAL aomenc (libaom 3.14.1)-encoded 64x64 MONOCHROME keyframe,
    deliberately forced two levels deep into decode_partition()'s recursion

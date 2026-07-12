@@ -15,11 +15,13 @@ reconstruction (OBU/header/bool-decoder/partition-tree framing), mirroring
 how `org-iso-h264` started with NAL/SPS/PPS framing before intra pixel
 decode was added -- **this phase's continuation now adds that pixel
 reconstruction**, at `org-iso-h264`'s equivalent first-pixel-decode
-milestone: real bit-exact luma reconstruction against real encoded data,
-deliberately scoped narrow (see `av1.decode-block`'s namespace docstring for
-the exact boundary: BLOCK_32X32 leaves (single- or, for the V_PRED/H_PRED
-mode-coverage extension below, real multi-leaf) / TX_32X32 / DCT_DCT /
-DC_PRED+V_PRED+H_PRED / luma-only). AV1's spec is far larger than H.264's, so
+milestone: real bit-exact luma (and, per the chroma-decode extension below,
+Cb/Cr) reconstruction against real encoded data, deliberately scoped narrow
+(see `av1.decode-block`'s namespace docstring for the exact boundary:
+BLOCK_32X32 leaves (single- or, for the V_PRED/H_PRED mode-coverage
+extension below, real multi-leaf) / TX_32X32 / DCT_DCT / DC_PRED+V_PRED+
+H_PRED for luma; TX_16X16 / DCT_DCT / UV_DC_PRED-only, 4:2:0, single-leaf-
+only for chroma). AV1's spec is far larger than H.264's, so
 per the ADR this repo does **not** attempt broad common-code sharing with
 H.264 -- only `codec-primitives`'s narrow generic shapes
 (`BlockTransform`/`QuantScale` protocols, `scan`/`unscan`) are candidates
@@ -46,10 +48,10 @@ reconstruction namespaces added below):
 | `av1.frame-header` | **the full `uncompressed_header()`**, intra frames only (`KEY_FRAME`/`INTRA_ONLY_FRAME`): frame_type/show_frame/showable_frame, frame size (`frame_size()`/`superres_params()`/`render_size()`), `tile_info()`, `quantization_params()`, `segmentation_params()`, `delta_q_params()`/`delta_lf_params()`, the `CodedLossless`/`AllLossless` computation, `loop_filter_params()`, `cdef_params()`, `lr_params()`, `read_tx_mode()`, `frame_reference_mode()`/`skip_mode_params()`/`global_motion_params()` (all zero-bit passthroughs since FrameIsIntra is always 1 in this phase's scope), `reduced_tx_set`, and `film_grain_params()`. Also now carries `use-128x128-superblock`/`mono-chrome`/`num-planes`/`subsampling-x`/`subsampling-y` through to the top-level returned map (bugfix, see below) |
 | `av1.bool-decoder` | the AV1 "Symbol decoder" (daala-derived non-binary arithmetic coder, spec 8.2): `init_symbol`/`read_bool`/`read_literal`/`read_symbol`/`exit_symbol` with CDF adaptation. Wholly separate implementation from H.264's CAVLC/CABAC (`h264.cavlc`) -- different coding scheme entirely |
 | `av1.tile-group` | `tile_group_obu()`'s entry (tile start/end, per-tile `init_symbol`/`exit_symbol`) + `decode_partition()` (spec 5.11.4) fully implemented: real default CDF tables (`Default_Partition_W8/W16/W32/W64/W128_Cdf`), real `partition`/`split_or_horz`/`split_or_vert` context derivation (AvailU/AvailL via a MiSizes grid this namespace maintains), real bool-decoder symbol reads -- down to every leaf partition. `decode_block()` is now called at every leaf **when the caller supplies** an injectable `:decode-block-fn` (see `av1.decode-block` below) -- existing callers that don't supply one keep the original "leaf recorded, no further bits consumed" behavior this namespace has always documented |
-| `av1.tables` | AV1 constant tables for coefficient decode/dequant/inverse transform/intra prediction: `Dc-Qlookup-8bit`/`Ac-Qlookup-8bit` (8-bit dequant lookup), `Cos128-Lookup`, `Default-Scan-32x32`, `Intra-Mode-Context-Dc-V-H`/`MAX_ANGLE_DELTA`/`Default-Angle-Delta-Cdf` (mode-coverage extension, see below), and the `Default_*_Cdf` tables (`Skip`/`Intra-Frame-Y-Mode`/`Txb-Skip`/`Eob-Pt-1024`/`Eob-Extra`/`Dc-Sign`/`Coeff-Base-Eob`/`Coeff-Base`/`Coeff-Br`) sliced to this phase's supported scope (TX_32X32 only, luma only -- see namespace docstring) |
-| `av1.transform` | dequantization (`dequantize`) + the AV1 inverse DCT (`inverse-dct!`, spec 7.13.2.3's generic butterfly-network algorithm, transcribed in full for n=2..6/TX_4X4..TX_64X64 even though only n=5/TX_32X32 is exercised against real data) + the 2D inverse transform process (`inverse-transform-2d`, row transform -> clip -> column transform) |
-| `av1.intra-pred` | DC/V/H intra prediction (`dc-predict`/`v-predict`/`h-predict`, spec 7.11.2.4/7.11.2.5) -- DC's all four haveLeft/haveAbove cases implemented (though the original single-block fixtures only exercise the "neither available" case); V_PRED/H_PRED added in the mode-coverage extension below, both exercised against real multi-leaf data with a genuine avail-above/avail-left neighbor (not just the degenerate no-neighbor fallback) |
-| `av1.decode-block` | **decode_block()** (spec 5.11.5) for this phase's narrow validated scope: `intra_frame_mode_info()` (`read_skip`/`read_cdef`/`intra_frame_y_mode`/`intra_angle_info_y`/`filter_intra_mode_info`'s conditional guard), `read_block_tx_size()`, `residual()`/`transform_block()`/`coeffs()` (all_zero/transform_type/eob_pt_1024/eob_extra/coeff_base/coeff_base_eob/coeff_br/dc_sign/sign_bit/golomb, with real per-context CDF persistence+adaptation, including cross-block dc_sign context via AboveDcContext/LeftDcContext), and reconstruction (predict_intra + dequantize + inverse_transform_2d + clip). See its namespace docstring for the exact scope boundary and why each boundary was chosen (frame-level `guard-frame-scope!` throws for out-of-scope streams) |
+| `av1.tables` | AV1 constant tables for coefficient decode/dequant/inverse transform/intra prediction: `Dc-Qlookup-8bit`/`Ac-Qlookup-8bit` (8-bit dequant lookup), `Cos128-Lookup`, `Default-Scan-32x32`, `Intra-Mode-Context-Dc-V-H`/`MAX_ANGLE_DELTA`/`Default-Angle-Delta-Cdf` (mode-coverage extension, see below), and the `Default_*_Cdf` tables (`Skip`/`Intra-Frame-Y-Mode`/`Txb-Skip`/`Eob-Pt-1024`/`Eob-Extra`/`Dc-Sign`/`Coeff-Base-Eob`/`Coeff-Base`/`Coeff-Br`) sliced to this phase's supported scope (TX_32X32 only, luma only). Chroma extension (see below): the SAME q-ctx-idx x TX_16X16 x chroma(ptype=1) slices of those same spec tables (`Default-Txb-Skip-Cdf-16x16-Chroma`/`Default-Eob-Pt-256-Cdf-Chroma`/`Default-Eob-Extra-Cdf-16x16-Chroma`/`Default-Dc-Sign-Cdf-Chroma`/`Default-Coeff-Base-Eob-Cdf-16x16-Chroma`/`Default-Coeff-Base-Cdf-16x16-Chroma`/`Default-Coeff-Br-Cdf-16x16-Chroma`), plus `Default-Scan-16x16` and `Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H` (see namespace docstring's chroma section for exactly how each was extracted/spot-checked) |
+| `av1.transform` | dequantization (`dequantize`) + the AV1 inverse DCT (`inverse-dct!`, spec 7.13.2.3's generic butterfly-network algorithm, transcribed in full for n=2..6/TX_4X4..TX_64X64) + the 2D inverse transform process (`inverse-transform-2d`, row transform -> clip -> column transform) -- already fully generic over transform size, so the chroma extension below (TX_16X16) needed NO changes here at all: `inverse-dct!`'s n=4 branch and `dq-denom`'s TX_16X16 case were already transcribed in full generality alongside luma's n=5/TX_32X32 (only n=5/TX_32X32 was exercised against real data before the chroma extension; n=4/TX_16X16 now is too) |
+| `av1.intra-pred` | DC/V/H intra prediction (`dc-predict`/`v-predict`/`h-predict`, spec 7.11.2.4/7.11.2.5) -- DC's all four haveLeft/haveAbove cases implemented (though the original single-block fixtures only exercise the "neither available" case); V_PRED/H_PRED added in the mode-coverage extension below, both exercised against real multi-leaf data with a genuine avail-above/avail-left neighbor (not just the degenerate no-neighbor fallback). `dc-predict` is plane-agnostic (frame-w/frame-h/x/y/log2W/log2H are all caller-supplied), so the chroma extension below reuses it as-is for UV_DC_PRED -- no changes needed here either |
+| `av1.decode-block` | **decode_block()** (spec 5.11.5) for this phase's narrow validated scope: `intra_frame_mode_info()` (`read_skip`/`read_cdef`/`intra_frame_y_mode`/`intra_angle_info_y`/`uv_mode`/`filter_intra_mode_info`'s conditional guard), `read_block_tx_size()`, `residual()`/`transform_block()`/`coeffs()` (all_zero/transform_type/eob_pt_1024 or eob_pt_256/eob_extra/coeff_base/coeff_base_eob/coeff_br/dc_sign/sign_bit/golomb, with real per-context CDF persistence+adaptation, including cross-block dc_sign/txb_skip context via per-plane AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext), and reconstruction (predict_intra + dequantize + inverse_transform_2d + clip) -- for BOTH luma (plane 0, TX_32X32) and, per the chroma extension below, U/V (planes 1/2, TX_16X16, 4:2:0). See its namespace docstring for the exact scope boundary and why each boundary was chosen (frame-level `guard-frame-scope!` throws for out-of-scope streams) |
 
 **Explicitly NOT implemented (next phase)**: inter frames (`frame_type ==
 INTER_FRAME`) and `show_existing_frame == 1` (both need cross-frame
@@ -67,8 +69,9 @@ bit-exact all the way through `decode_block()` now (when `av1.decode-block`
 is wired in as the `:decode-block-fn`), including real MULTI-leaf frames
 (mode-coverage extension below), but **only** for the narrow shape
 `av1.decode-block`'s namespace docstring specifies -- ADST/FLIPADST/IDTX
-transform types, any intra mode other than DC_PRED/V_PRED/H_PRED, any
-transform size other than TX_32X32, chroma planes, and segmentation/
+transform types, any intra mode other than DC_PRED/V_PRED/H_PRED (luma) or
+UV_DC_PRED (chroma, see below), any transform size other than TX_32X32
+(luma)/TX_16X16 (chroma), 4:2:2/4:4:4 chroma subsampling, and segmentation/
 delta-Q/delta-LF/screen-content-tools/intra-BC are all explicitly out of
 scope and throw `ex-info` rather than silently mis-decoding. Inter
 prediction, loop-filter/CDEF/loop-restoration in-loop filtering, and film
@@ -119,10 +122,112 @@ This required two real extensions beyond just adding the prediction math:
   `av1.intra-pred`'s V_PRED/H_PRED implementation only handles pAngle
   exactly 90/180.
 
-Transform size (TX_16X16/TX_8X8 and the ADST/IDTX transform types
-`get_tx_set()` can select for them) was considered but not pursued in this
-pass, per ADR-2607122000 Migration step 9's guidance to land one narrow,
-fully-validated extension rather than spread across both axes.
+Luma transform size beyond TX_32X32 (TX_16X16/TX_8X8 for LUMA leaves smaller
+than BLOCK_32X32, and the ADST/IDTX transform types `get_tx_set()` can select
+for them) was considered but not pursued in this pass, per ADR-2607122000
+Migration step 9's guidance to land one narrow, fully-validated extension
+rather than spread across both axes. (TX_16X16 itself IS now used below --
+for the CHROMA planes of a BLOCK_32X32 leaf under 4:2:0 subsampling, which is
+DCT_DCT-forced the same structural way TX_32X32 is for luma, not for a
+smaller luma leaf, which would need real ADST support.)
+
+### Chroma (Cb/Cr) decode (ADR-2607122000 Migration step 9, continued)
+
+The luma-only milestones above have been extended to also decode the U (Cb)
+and V (Cr) planes, for 4:2:0 content (`subsampling_x=1, subsampling_y=1`)
+only. See `av1.decode-block`'s namespace docstring for the exact scope
+boundary and rationale; summarized:
+
+- **UV_DC_PRED only.** `uv_mode` (spec #Cdf selection process) is read for
+  real (`av1.decode-block/read-uv-mode`, against
+  `av1.tables/Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H`, the
+  `TileUVModeCflAllowedCdf[YMode]` rows for YMode in {DC_PRED,V_PRED,H_PRED}
+  -- always the CFL-allowed cdf variant here since this namespace's only
+  block shape has `Max(Block_Width,Block_Height) <= 32`), but the decoded
+  result is restricted to `UV_DC_PRED` (0) -- any other value, including
+  `UV_CFL_PRED` (which would need `read_cfl_alphas()`), throws. `uv_mode`'s
+  ctx is simply the block's own already-decoded `YMode` (not a neighbor
+  lookup, unlike `y_mode`/`dc_sign`), so no cross-block state is needed for
+  it. `intra_angle_info_uv()` is a real zero-bit no-op for this scope (since
+  `is_directional_mode(UV_DC_PRED)` is false) rather than an assumed skip.
+- **Chroma transform type needs no bitstream read at all.** Unlike luma
+  (where `transform_type()` IS called, itself a zero-bit forced read for
+  TX_32X32), `coeffs()` only calls `transform_type()` when `plane==0` --
+  chroma's `TxType` comes from `compute_tx_type()`'s
+  `Mode_To_Txfm[UVMode]` path, which for `UVMode==UV_DC_PRED` is `DCT_DCT`
+  and always `is_tx_type_in_set` (spot-checked against the spec's own
+  `Mode_To_Txfm`/`Tx_Type_In_Set_Intra` tables, not assumed) -- so chroma
+  `TxType` is `DCT_DCT` with a structural zero-bit guarantee, the same
+  strength of guarantee as luma's TX_32X32 case, via a genuinely different
+  code path.
+- **Chroma transform size is TX_16X16, unconditionally, for this
+  namespace's only supported leaf shape.** A BLOCK_32X32 luma leaf
+  subsamples (4:2:0) to exactly BLOCK_16X16 chroma
+  (`Subsampled_Size[BLOCK_32X32][1][1]`) whose `Max_Tx_Size_Rect` is
+  TX_16X16 -- both spot-checked directly against the spec's own tables
+  rather than reconstructed from memory. `av1.transform`'s inverse-DCT/
+  dequantize/2D-inverse-transform functions were ALREADY fully generic
+  over transform size (transcribed in full for n=2..6 from the start, see
+  that namespace's docstring) -- so TX_16X16 chroma reconstruction needed
+  **zero changes** to `av1.transform`, only to `av1.decode-block`'s
+  coefficient-decode plumbing (see below) and new TX_16X16/chroma CDF
+  table slices in `av1.tables` (see that namespace's docstring).
+- **Coefficient decode (`coeffs()`) is now generalized over plane/tx-size**
+  (`av1.decode-block/read-coeffs`, parameterized by a `spec` map -- see
+  `luma-spec-base`/`chroma-spec-base`/`u-spec`/`v-spec`) so the SAME
+  implementation serves luma (TX_32X32, bwl=5) and chroma (TX_16X16,
+  bwl=4) rather than duplicating the ~90-line coefficient-decode loop.
+  `get-coeff-base-ctx`/`get-coeff-br-ctx` were generalized the same way
+  (parameterized by `bwl`/`w` instead of hardcoded TX_32X32 constants) --
+  `Coeff_Base_Ctx_Offset[TX_16X16]` is IDENTICAL to
+  `Coeff_Base_Ctx_Offset[TX_32X32]` in the spec's own table (spot-checked,
+  not assumed), so `av1.tables/Coeff-Base-Ctx-Offset-32x32` is reused
+  directly for chroma without a separate slice.
+- **U and V planes share coefficient-CDF adaptation state; per-plane
+  cross-block dc/level context is genuinely separate.** Per spec, the
+  `ptype` dimension of `TileTxbSkipCdf`/`TileCoeffBaseCdf`/etc. is "luma vs
+  chroma", not "Y vs U vs V" -- so U's coefficient reads adapt the SAME cdf
+  state V's reads then continue adapting (`u-spec`/`v-spec` intentionally
+  share every `:*-cdf-key`, only `:plane`/`:delta-q-dc`/`:delta-q-ac`
+  differ). `AboveDcContext`/`LeftDcContext` (now joined by
+  `AboveLevelContext`/`LeftLevelContext`, needed for chroma's
+  `get_txb_skip_ctx` -- see below) ARE genuinely per-plane (spec indexes
+  them by literal plane 1 vs 2), implemented via
+  `av1.decode-block/record-above!`/`record-left!`/`get-dc-sign-ctx` keyed
+  by `[map-key plane ...]`.
+- **Chroma's `txb_skip` context (`get_txb_skip_ctx`, plane>0 branch) is a
+  genuinely different formula than luma's** (`ctx = 7 + (above!=0) +
+  (left!=0)`, from real `AboveLevelContext`/`AboveDcContext` OR-together,
+  vs. luma's hardcoded `ctx=0` since `bw==w && bh==h` always holds for
+  luma's one block shape) -- implemented as real map lookups
+  (`av1.decode-block/get-txb-skip-ctx-chroma`), not a hardcoded constant,
+  even though this namespace's current scope (single whole-frame leaf, see
+  below) means it always evaluates to exactly 7 in practice.
+- **Per-plane quantizer**: `dc-q-idx`/`ac-q-idx` for U/V use
+  `base_q_idx + delta_q_u_dc/ac` / `base_q_idx + delta_q_v_dc/ac`
+  respectively (`av1.frame-header/parse-quantization-params` already
+  parsed all four deltas -- no frame-header changes were needed for this
+  extension), vs. luma's `base_q_idx + delta_q_y_dc` (DC) /
+  `base_q_idx` (AC, no luma AC delta exists in the spec).
+- **SCOPE BOUNDARY: single whole-frame leaf only (no multi-leaf chroma
+  yet).** Unlike luma (which validates real multi-leaf frames via the
+  V_PRED/H_PRED fixtures above), chroma decode is validated ONLY for a
+  single BLOCK_32X32 leaf covering the entire frame (`AvailU`/`AvailL`
+  both false) -- `av1.decode-block/make-decode-block-fn`'s returned
+  callback throws `:unsupported-multi-leaf-chroma` if a color frame's leaf
+  has either avail flag true. This mirrors the ORIGINAL (pre-V_PRED/H_PRED)
+  luma milestone's scope, landed as its own narrow step per this repo's
+  practice of extending one axis at a time. The per-plane
+  AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext machinery
+  above is nonetheless implemented generally (real map lookups, not
+  hardcoded), so lifting this one guard is the only work a future
+  multi-leaf-chroma extension needs.
+- **Monochrome streams are unaffected.** `guard-frame-scope!`'s
+  color-format check now accepts EITHER `mono_chrome=1` (luma-only, all
+  pre-existing fixtures/tests) OR `mono_chrome=0` with `num_planes=3`/
+  `subsampling_x=1`/`subsampling_y=1` (4:2:0 color) -- every chroma code
+  path is gated on whether the frame is actually color, so monochrome
+  streams never touch any of the above.
 
 ## Validation
 
@@ -294,11 +399,74 @@ plain diff-count check (many pixels were "close" -- off by 1-7 levels in
 a smooth, plausible-looking pattern) and was only caught by requiring
 exact equality against the independent reference decode.
 
-Not yet exercised against real data: any intra mode other than DC_PRED/
-V_PRED/H_PRED, a nonzero `AngleDeltaY` (this repo's V_PRED/H_PRED only
-handle pAngle exactly 90/180, throwing otherwise), any transform size
-other than TX_32X32, ADST/IDTX/FLIPADST transform types, chroma planes,
-and inter prediction.
+Not yet exercised against real data (in this multi-leaf luma context):
+any intra mode other than DC_PRED/V_PRED/H_PRED, a nonzero `AngleDeltaY`
+(this repo's V_PRED/H_PRED only handle pAngle exactly 90/180, throwing
+otherwise), any transform size other than TX_32X32, ADST/IDTX/FLIPADST
+transform types, MULTI-leaf chroma planes (single-leaf chroma IS now
+exercised, see below), and inter prediction.
+
+### Chroma (Cb/Cr) decode (`av1.decode-block-test`, `keyframe-32x32-color`/`keyframe-32x32-color-busy`)
+
+Validates the chroma-decode extension against TWO REAL aomenc-encoded
+32x32 4:2:0 COLOR keyframes (real, non-flat Cb/Cr data -- NOT
+`--monochrome`), comparing this repo's reconstructed luma AND Cb AND Cr
+planes against **dav1d's independent decode of the same bitstream,
+bit-exactly (no tolerance) on all three planes**:
+
+- `keyframe-32x32-color.obu`: luma is the same two-axis brightness-ramp
+  family as `keyframe-32x32-gradient.obu`; Cb is a 16x16 ramp across x
+  (base 100, +/-24); Cr is a 16x16 ramp across y (base 160, +/-18) --
+  three genuinely different profiles per plane (authored as known raw
+  I420 pixel bytes, not a lavfi filter). eob=16 (luma) / 7 (Cb) / 10 (Cr).
+- `keyframe-32x32-color-busy.obu`: busier sinusoidal-plus-ramp content on
+  all three planes, each at a different frequency/phase, exercising far
+  more of `get-coeff-base-ctx`/`get-coeff-br-ctx` (including the
+  coeff_br/golomb continuation paths) and the U/V planes' SHARED
+  coefficient-cdf adaptation state (see the chroma-decode section above)
+  across many more symbol reads. eob=190 (luma) / 66 (Cb) / 105 (Cr).
+
+Both encoded with the same disabled-everything-but-DC-and-NONE/TX_32X32
+baseline as the gradient/busy luma fixtures, PLUS `--enable-cfl-intra=0`
+(so `UV_CFL_PRED` can never be the encoder's choice -- combined with the
+pre-existing `--enable-smooth-intra=0 --enable-paeth-intra=0
+--enable-directional-intra=0`, which also gate the corresponding UV
+modes, `{DC_PRED}`/`{UV_DC_PRED}` are structurally the only modes left for
+the encoder to choose for luma/chroma respectively, not merely the likely
+outcome for smooth content):
+
+```sh
+aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \
+  --enable-cdef=0 --enable-restoration=0 --loopfilter-control=0 \
+  --enable-filter-intra=0 --enable-smooth-intra=0 --enable-paeth-intra=0 \
+  --enable-directional-intra=0 --enable-angle-delta=0 --enable-intrabc=0 \
+  --enable-palette=0 --enable-cfl-intra=0 --enable-qm=0 --enable-tx64=0 \
+  --enable-rect-tx=0 --enable-rect-partitions=0 --enable-ab-partitions=0 \
+  --enable-1to4-partitions=0 --enable-tx-size-search=0 \
+  --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \
+  --obu -o keyframe-32x32-color.obu keyframe-32x32-color.y4m
+
+dav1d -i keyframe-32x32-color.obu -o keyframe-32x32-color.dav1d.yuv
+```
+
+(aomenc/libaom 3.14.1, dav1d 1.5.3, both from Homebrew, generated
+2026-07-13; both `.obu` and the corresponding `.dav1d.yuv` golden I420
+output -- 1024 Y + 256 U + 256 V bytes -- are checked in under
+`resources/av1/fixtures/`; see `test/av1/fixtures.clj` docstrings for
+exactly how each was produced). `av1.decode-block-test` additionally
+confirms (not merely infers) the real encoder chose DC_PRED/UV_DC_PRED
+and the single BLOCK_32X32/PARTITION_NONE/TX_32X32(luma)/TX_16X16(chroma)
+leaf shape, and a third test (`multi-leaf-color-throws-test`) confirms
+that a simulated second leaf (avail-u?/avail-l? both true) for a color
+frame is rejected with `ex-info` (`:reason :unsupported-multi-leaf-chroma`)
+rather than silently mis-decoded, per this extension's single-whole-frame-
+leaf scope boundary (see the chroma-decode section above).
+
+Not yet exercised against real data: MULTI-leaf color frames (no real
+cross-leaf chroma AboveLevelContext/AboveDcContext tracking yet, see
+scope boundary above), any UVMode other than UV_DC_PRED (including
+UV_CFL_PRED), 4:2:2/4:4:4 chroma subsampling, any chroma transform size
+other than TX_16X16, and inter prediction.
 
 ### Partition scope boundary (`av1.decode-block-test`, `keyframe-64x64-split16`)
 
@@ -364,9 +532,10 @@ time rather than spreading across scope axes.
 ```
 
 To also get real reconstructed pixels (this phase's narrow scope --
-BLOCK_32X32/PARTITION_NONE/TX_32X32/DCT_DCT leaves, DC_PRED/V_PRED/H_PRED,
-luma only, see `av1.decode-block`'s namespace docstring), supply its
-`:decode-block-fn`:
+BLOCK_32X32/PARTITION_NONE/TX_32X32/DCT_DCT leaves, DC_PRED/V_PRED/H_PRED
+luma, and, for 4:2:0 color streams, UV_DC_PRED-only chroma at a single
+whole-frame leaf -- see `av1.decode-block`'s namespace docstring), supply
+its `:decode-block-fn`:
 
 ```clojure
 (require '[av1.decode-block :as db])
@@ -379,6 +548,10 @@ luma only, see `av1.decode-block`'s namespace docstring), supply its
 (def luma-plane (:luma-plane (:final-tile-state tile)))
 ;; => flat row-major (MiCols*4) x (MiRows*4) vector of reconstructed 8-bit
 ;;    luma samples
+(def u-plane (:u-plane (:final-tile-state tile))) ; Cb, 4:2:0 color streams only
+(def v-plane (:v-plane (:final-tile-state tile))) ; Cr, 4:2:0 color streams only
+;; => each a flat row-major (MiCols*4/2) x (MiRows*4/2) vector of
+;;    reconstructed 8-bit chroma samples
 ```
 
 ## Test
