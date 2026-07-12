@@ -822,5 +822,26 @@
        :reduced-tx-set reduced-tx-set
        :gm-type (:gm-type global-motion)
        :film-grain-params film-grain
+       ;; Bugfix (Phase 1 pixel-reconstruction continuation, ADR-2607122000
+       ;; Migration step 9): av1.tile-group/parse-tile-group-obu reads
+       ;; `:use-128x128-superblock` (and residual()/decode_block() need
+       ;; `:mono-chrome`/`:num-planes`/`:subsampling-x`/`:subsampling-y`) off
+       ;; *this* map, but before this fix none of these seq_header_obu()
+       ;; fields were copied into frame-header's top-level return map --
+       ;; only reachable via the (separate) seq-hdr argument callers already
+       ;; hold. The lookup silently returned nil (falsy), so
+       ;; parse-tile-group-obu always fell back to BLOCK_64X64 superblocks
+       ;; even for a `use_128x128_superblock == 1` stream (confirmed against
+       ;; a real SVT-AV1... a real aomenc-encoded 32x32 monochrome stream,
+       ;; 2026-07-13: `seq-hdr` decoded `:use-128x128-superblock 1` but the
+       ;; superblock loop silently used BLOCK_64X64 instead of
+       ;; BLOCK_128X128). Copying these through here (instead of threading a
+       ;; second seq-hdr argument into every downstream fn) keeps frame-hdr
+       ;; self-contained the same way :base-q-idx is already duplicated here.
+       :use-128x128-superblock (:use-128x128-superblock seq-hdr)
+       :mono-chrome (:mono-chrome seq-hdr)
+       :num-planes (:num-planes seq-hdr)
+       :subsampling-x (:subsampling-x seq-hdr)
+       :subsampling-y (:subsampling-y seq-hdr)
        :reader-after-quantization-params r18
        :reader-after-frame-header r27}))))
