@@ -1,10 +1,14 @@
 # kotoba-lang/org-aomedia-av1
 
-Zero-dep portable `.cljc` AV1 (AOMedia Video 1, AV1 Bitstream & Decoding
-Process Specification) bitstream **framing + symbol decoder primitives**.
-Named `org-aomedia-av1` (not `org-iso-*`/`org-ietf-*`) because AV1 is
-published by the Alliance for Open Media, not ISO/IEC or the IETF -- see
-`kotoba-lang/org-iso-h264`'s README for the sibling naming rationale.
+Zero-dep, mostly-portable `.cljc` AV1 (AOMedia Video 1, AV1 Bitstream &
+Decoding Process Specification) bitstream **framing + symbol decoder
+primitives**, pixel reconstruction (decode), and, as of 2026-07, a first
+narrow-scope pixel **encoder** too (see the "Encode" section below --
+`av1.bool-encoder` is JVM Clojure only, a documented exception to this
+repo's usual `.cljc` portability). Named `org-aomedia-av1` (not
+`org-iso-*`/`org-ietf-*`) because AV1 is published by the Alliance for
+Open Media, not ISO/IEC or the IETF -- see `kotoba-lang/org-iso-h264`'s
+README for the sibling naming rationale.
 
 ## Scope (Phase 0 + Phase 1, now with real pixel reconstruction)
 
@@ -1237,6 +1241,113 @@ its `:decode-block-fn`:
 (def v-plane (:v-plane (:final-tile-state tile))) ; Cr, 4:2:0 color streams only
 ;; => each a flat row-major (MiCols*4/2) x (MiRows*4/2) vector of
 ;;    reconstructed 8-bit chroma samples
+```
+
+## Encode (2026-07 AV1 encode task, ADR-2607122000 Migration step 9 continuation)
+
+Everything above this section is DECODE (the org's original AV1 phase).
+This section adds the first AV1 **encode** support, mirroring
+`org-iso-h264`'s own decode-\>encode task methodology: derive the encoder
+by inverting the decoder's own transcribed logic (the AV1 spec, like
+H.264's, only ever defines the decode side -- there is no spec text for a
+"symbol encoding process" or a forward transform to transcribe from), then
+validate the result against real, independent decoders rather than
+assuming correctness from symmetry with the decode side.
+
+**Scope**, deliberately narrowed to this repo's very first pixel-
+reconstruction decode milestone's shape (single BLOCK_32X32 leaf, DC_PRED,
+TX_32X32/DCT_DCT, luma only) -- not the full range of modes/sizes the
+decode side has since grown to support (V_PRED/H_PRED/PAETH/SMOOTH/chroma/
+ADST/inter):
+
+| ns | role |
+|---|---|
+| `av1.bitwriter` | MSB-first bit writer -- the exact structural inverse of `av1.bitreader`'s descriptors (`f`/`uvlc`/`le`/`leb128`/`su`/`ns`/`byte-alignment`), plus `trailing-bits` (spec 5.3.4's `trailing_one_bit`+zero-pad, distinct from plain `byte-alignment` -- see below). Verified by round-tripping every descriptor back through `av1.bitreader` across a wide value range (`test/av1/bitwriter_test.clj`) |
+| `av1.bool-encoder` | the AV1 Symbol ENCODER -- ported from libaom's real `od_ec_enc_*` family (`aom_dsp/entenc.c`/`entenc.h`, AOMediaCodec/aom master), the actual encode-side counterpart of the daala-derived range coder `av1.bool-decoder` implements the decode side of (there is no spec text for this at all). CDF adaptation is shared with `av1.bool-decoder` via a factored-out `av1.bool-decoder/adapt-cdf` public fn, so both sides are structurally guaranteed to adapt identically. Implementation simplification: never flushes `low`/`cnt` mid-stream (correct but unbounded-growing, safe for this repo's tiny single-keyframe scope) -- **JVM Clojure only** (`.clj`, not `.cljc`: needs true `bigint` arithmetic, which does not exist in ClojureScript's numeric tower, confirmed via clj-kondo -- see its namespace docstring for the full portability note and what a cljs port would need). Verified against `av1.bool-decoder` across thousands of mixed-cdf symbol round-trips (`test/av1/bool_encoder_test.clj`) |
+| `av1.transform` (additions) | `forward-transform-2d`/`quantize` -- the exact forward inverse of the pre-existing `inverse-transform-2d`/`dequantize`, derived by NUMERICALLY PROBING the real inverse transform (not re-derived from an external forward-DCT source) to discover its exact orthonormal-basis scale factor, then confirmed point-by-point against multi-coefficient probes before being relied on (see `forward-transform-2d`'s docstring for the full derivation). Verified: exact round-trip for flat/low-frequency residuals, small bounded lossy error for busier content at a fine quantizer (`test/av1/transform_encode_test.clj`) |
+| `av1.encode-block` | `write-coeffs`/`write-skip`/`write-y-mode` -- the encode-side inverse of `av1.decode-block`'s `read-coeffs`/`read-skip`/`read-y-mode`, for this section's narrow scope only. Reuses `av1.decode-block`'s own context-derivation helpers directly (`get-coeff-base-ctx`/`get-coeff-br-ctx`/`get-dc-sign-ctx`/`record-above!`/`record-left!`, made public there for exactly this reason -- a visibility-only change, no decode-side logic change) rather than re-transcribing them, so context derivation cannot independently drift between encode and decode. Implements the full `coeff_base`/`coeff_base_eob`/`coeff_br` continuation AND the golomb escape code (`write-golomb`) for real -- not just the common case (see the `busy` fixture below) |
+| `av1.sequence-header`/`av1.frame-header` (additions) | `write` -- narrow encode-side inverses of `parse`, covering exactly the field combination this scope needs (`reduced_still_picture_header=1`, monochrome, single tile, `TX_MODE_LARGEST`, no segmentation/delta-q/delta-lf/CDEF/loop-restoration/film-grain/superres) -- NOT a full general inverse of every `parse` branch. Verified by round-tripping back through `parse` itself (`test/av1/sequence_header_encode_test.clj`/`test/av1/frame_header_encode_test.clj`) |
+| `av1.obu` (addition) | `write-obu`/`write-obu-header` -- OBU framing (header + leb128 `obu_size` + payload), low-overhead format only, no extension header |
+| `av1.encode` | top-level orchestration (`encode-keyframe`): pixels -\> DC_PRED residual -\> forward-transform-2d/quantize -\> `av1.encode-block`/bool-encoder -\> `av1.frame-header`/`av1.sequence-header` `write` -\> OBU framing -\> a complete, standalone, legal AV1 bitstream |
+
+**A real, spec-conformance bug this task's own validation caught** (not
+assumed away): the first working version of this encoder produced a
+bitstream this repo's OWN decoder parsed back correctly, but that real
+decoders (`ffmpeg`/`dav1d`) rejected outright ("`trailing_one_bit out of
+range: 0, but must be in [1,1]`"). Spec 5.3.2's `open_bitstream_unit()`
+wrapper calls `trailing_bits()` (a `1` bit then zero-pad) -- NOT plain
+zero-padding -- after any `OBU_SEQUENCE_HEADER`/standalone
+`OBU_FRAME_HEADER`/`OBU_METADATA` payload that doesn't already end
+byte-aligned; this repo's own decode side never validates that pattern
+(it only skips to the declared `obu_size`), so the bug was invisible until
+tested against real independent decoders -- exactly the class of error
+this repo's decode-side "bit-exact against a real independent decoder, no
+tolerance" validation stance exists to catch, now caught on the encode
+side too. Fixed via `av1.bitwriter/trailing-bits` (distinct from the
+pre-existing plain-zero-pad `byte-alignment`, which remains correct for
+`byte_alignment()`'s OTHER call site inside `frame_obu()`).
+
+### Validation
+
+Four fixtures (`resources/av1/fixtures/encode-keyframe-32x32-{flat,dc,
+gradient,busy}.obu`), all THIS REPO'S OWN encoder output (not a real
+encoder's -- see `test/av1/fixtures.clj` docstrings for the exact
+`av1.encode/encode-keyframe` invocation behind each one), validated
+against **two independent real decoders**:
+
+- `dav1d` (1.5.3): `dav1d -i <name>.obu -o <name>.dav1d.yuv` -- succeeds
+  (no error) for all four, and this repo's own decode of each fixture is
+  **bit-exact (no tolerance)** against dav1d's independent decode
+  (`test/av1/encode_test.clj`'s `dav1d-bit-exact-*-test`s, checked against
+  the checked-in `.dav1d.yuv` golden files).
+- `aomdec` (libaom 3.14.1, `aomdec --i420 -o ... <name>.obu`): also
+  succeeds for all four, with its Y-plane output byte-identical to
+  dav1d's -- a second independent decoder implementation agreeing with
+  the first (recorded in `test/av1/fixtures.clj`'s docstrings; not
+  re-checked at test time, to keep the test suite hermetic like every
+  other test namespace in this repo).
+
+Fixture-by-fixture:
+
+- `encode-keyframe-32x32-flat`: flat 128 (== `DC_PRED`'s no-neighbors
+  predicted value exactly), `skip=1` (no residual at all) -- decodes back
+  to the target exactly.
+- `encode-keyframe-32x32-dc`: flat 170, a real (non-skip) DC-only
+  residual (a constant residual is exactly the DC basis function, every
+  AC coefficient is exactly 0 by DCT orthogonality) -- decodes back to
+  the target exactly (no quantization loss possible for a single
+  coefficient at this quantizer).
+- `encode-keyframe-32x32-gradient`: a smooth single-cycle horizontal
+  sinusoid, `base_q_idx=60` -- a genuine multi-coefficient AC residual;
+  bit-exact against both real decoders (not bit-exact against the
+  original floating-point-designed target -- normal, expected lossy
+  transform-coding error, not a bug).
+- `encode-keyframe-32x32-busy`: busier multi-frequency content, a FINE
+  `base_q_idx=20` chosen specifically so several quantized coefficients'
+  magnitude exceeds 14 (confirmed: 18 of 56 nonzero coefficients), forcing
+  the `coeff_br` continuation loop's full 4-iteration "maxed out" path AND
+  the golomb escape code (`write-golomb`) to actually run -- bit-exact
+  against both real decoders, the strongest available confirmation that
+  `write-golomb` (the one code path the other three fixtures never reach)
+  is correct, not merely that it doesn't crash.
+
+**Not yet covered by this encode pass** (mirrors this section's own
+narrow scope, see above): any partition shape other than a single
+whole-frame `BLOCK_32X32` leaf, any intra mode other than `DC_PRED`, any
+transform size other than `TX_32X32`, chroma planes, inter frames, and a
+`.cljc`/ClojureScript-portable symbol encoder (`av1.bool-encoder` is JVM
+Clojure only, see its namespace docstring).
+
+### Usage
+
+```clojure
+(require '[av1.encode :as enc])
+
+(def pixels (vec (repeat (* 32 32) 128))) ;; flat 32x32 luma, 0-255
+(def obu-bytes (enc/encode-keyframe pixels 100 {:skip? true}))
+;; => a complete, standalone AV1 OBU stream (byte vector) --
+;;    decodable by this repo's own av1.decode-block, real dav1d,
+;;    real aomdec, `ffmpeg -f obu`, etc.
 ```
 
 ## Test

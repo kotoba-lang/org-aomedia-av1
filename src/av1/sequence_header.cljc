@@ -7,7 +7,8 @@
    fetched 2026-07-12). Field order below matches the syntax table
    exactly -- bitstream position depends on evaluating every conditional
    in the same order the spec does, since this is a serial bit reader."
-  (:require [av1.bitreader :as br]))
+  (:require [av1.bitreader :as br]
+            [av1.bitwriter :as bw]))
 
 (def SELECT_SCREEN_CONTENT_TOOLS 2)
 (def SELECT_INTEGER_MV 2)
@@ -299,3 +300,70 @@
 
 (defn- parse-post-operating-points [r base] (first (parse-common-tail r base)))
 (defn- parse-post-operating-points-general [r base] (first (parse-common-tail r base)))
+
+;; =======================================================================
+;; ENCODE side: `write` -- the encode-side inverse of `parse` above, but
+;; ONLY for this repo's narrow encode scope (2026-07 AV1 encode task,
+;; ADR-2607122000 Migration step 9 continuation): `reduced_still_picture_
+;; header == 1` (this deliberately picks the SIMPLEST legal sequence
+;; header shape the spec allows -- the same shape AVIF still-image
+;; profiles commonly use -- rather than a fully general inverse of every
+;; `parse` branch; a full general `write` mirroring every conditional
+;; `parse` walks is future work, not needed for this repo's first encode
+;; pass), monochrome (`mono_chrome=1`), 8-bit, no superres/CDEF/loop-
+;; restoration/film-grain. This collapses `parse`'s dozens of conditional
+;; fields to a small, fully-deterministic bit sequence (see this fn's
+;; inline comments for exactly which fields are zero-bit-forced by this
+;; choice) -- verified by round-tripping this fn's own output back through
+;; `parse` itself (see test/av1/sequence_header_encode_test.clj), the
+;; strongest available check since `parse` is the same spec-transcribed
+;; reader this repo's decode side already validates against real
+;; aomenc/SVT-AV1 streams.
+;;
+;; `cfg` keys: `:max-frame-width` `:max-frame-height` (pixel dimensions,
+;; this repo's encode scope only reaches 32x32) -- everything else in this
+;; narrow shape is a fixed constant, not configurable (a wider `write`
+;; would need more `cfg` keys)."
+(defn write
+  [writer {:keys [max-frame-width max-frame-height]}]
+  (let [;; FloorLog2(maxFrameWidthMinus1) per spec's own encoder guidance
+        ;; is the minimal `frame_width_bits_minus_1` -- for this repo's
+        ;; 32x32 scope, max-frame-width=32 -> max-frame-width-minus-1=31 ->
+        ;; FloorLog2(31)=4 -> frame-width-bits-minus-1=4 (5-bit field,
+        ;; enough for width up to 32).
+        max-frame-width-minus-1 (dec max-frame-width)
+        max-frame-height-minus-1 (dec max-frame-height)
+        frame-width-bits-minus-1 (br/floor-log2 max-frame-width-minus-1)
+        frame-height-bits-minus-1 (br/floor-log2 max-frame-height-minus-1)]
+    (-> writer
+        (bw/f 3 0)                                  ;; seq_profile = 0
+        (bw/f 1 1)                                  ;; still_picture = 1
+        (bw/f 1 1)                                  ;; reduced_still_picture_header = 1
+        (bw/f 5 0)                                  ;; seq_level_idx[0] = 0
+        ;; -- parse-common-tail, reduced_still_picture_header==1 path --
+        (bw/f 4 frame-width-bits-minus-1)
+        (bw/f 4 frame-height-bits-minus-1)
+        (bw/f (inc frame-width-bits-minus-1) max-frame-width-minus-1)
+        (bw/f (inc frame-height-bits-minus-1) max-frame-height-minus-1)
+        ;; frame_id_numbers_present_flag: NOT written (reduced path forces 0)
+        (bw/f 1 0)                                  ;; use_128x128_superblock = 0
+        (bw/f 1 0)                                  ;; enable_filter_intra = 0
+        (bw/f 1 0)                                  ;; enable_intra_edge_filter = 0
+        ;; reduced_still_picture_header==1: enable_interintra_compound..
+        ;; order_hint_bits are ALL forced 0/SELECT_* with NO bits written
+        ;; (see `parse`'s own reduced-path branch) -- this fn writes
+        ;; nothing for any of them, matching exactly.
+        (bw/f 1 0)                                  ;; enable_superres = 0
+        (bw/f 1 0)                                  ;; enable_cdef = 0
+        (bw/f 1 0)                                  ;; enable_restoration = 0
+        ;; -- color_config(), seq_profile=0 --
+        (bw/f 1 0)                                  ;; high_bitdepth = 0 (8-bit)
+        (bw/f 1 1)                                  ;; mono_chrome = 1
+        (bw/f 1 0)                                  ;; color_description_present_flag = 0
+        ;; mono_chrome==1 branch: only color_range is read (subsampling_x/y
+        ;; forced 1/1, chroma_sample_position forced CSP_UNKNOWN,
+        ;; separate_uv_delta_q forced 0 -- all zero-bit, see `parse-color-
+        ;; config`'s mono_chrome==1 branch).
+        (bw/f 1 0)                                  ;; color_range = 0
+        (bw/f 1 0)                                  ;; film_grain_params_present = 0
+        )))
