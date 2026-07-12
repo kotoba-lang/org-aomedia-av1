@@ -1678,3 +1678,98 @@
     [5273 5379 20177 20270 20385 20439 20949 21695 21774 23138 24256 24703 26679 32768 0]
   ])
 
+;; ---------------------------------------------------------------------
+;; Inter zero-motion-baseline extension tables (ADR-2607122000 Migration
+;; step 9 continuation, "first inter-frame support" -- see av1.decode-block/
+;; av1.frame-header namespace docstrings). Transcribed field-for-field from
+;; AOMediaCodec/av1-spec master, 10.additional.tables.md (fetched
+;; 2026-07-13), the same source snapshot the rest of this namespace uses.
+;; Every table below is used ONLY by this repo's narrow single-leaf/
+;; no-neighbor/single-ref/GLOBALMV-or-NEWMV-zero-mv inter scope (see
+;; av1.decode-block's "Find MV stack" section) -- none of these are general
+;; enough (e.g. compound/comp_ref/interp_filter/motion_mode) to serve a
+;; wider inter scope without further transcription.
+
+;; Default_Is_Inter_Cdf[ IS_INTER_CONTEXTS=4 ][ 3 ]. This repo's only
+;; reachable ctx (no avail neighbors) is 0.
+(def Default-Is-Inter-Cdf
+  [[806 32768 0]
+   [16662 32768 0]
+   [20186 32768 0]
+   [26538 32768 0]])
+
+;; Default_Single_Ref_Cdf[ REF_CONTEXTS=3 ][ SINGLE_REFS-1=6 ][ 3 ], indexed
+;; [ctx][p-1] for single_ref_p1..p6 (p1=index 0 .. p6=index 5). This repo's
+;; only reachable ctx (no avail neighbors -> count_refs always 0 ->
+;; ref_count_ctx(0,0)=1) is row 1; rows 0/2 are transcribed for completeness
+;; but never exercised by this repo's fixtures.
+(def Default-Single-Ref-Cdf
+  [[[4897 32768 0] [1555 32768 0] [4236 32768 0] [8650 32768 0] [904 32768 0] [1444 32768 0]]
+   [[16973 32768 0] [16751 32768 0] [19647 32768 0] [24773 32768 0] [11014 32768 0] [15087 32768 0]]
+   [[29744 32768 0] [30279 32768 0] [31194 32768 0] [31895 32768 0] [26875 32768 0] [30304 32768 0]]])
+
+;; Default_New_Mv_Cdf[ NEW_MV_CONTEXTS=6 ][ 3 ]. This repo's only reachable
+;; NewMvContext (find_mv_stack with NumMvFound=0/CloseMatches=0/
+;; TotalMatches=0, see av1.decode-block) is 0.
+(def Default-New-Mv-Cdf
+  [[24035 32768 0] [16630 32768 0] [15339 32768 0] [8386 32768 0] [12222 32768 0] [4676 32768 0]])
+
+;; Default_Zero_Mv_Cdf[ ZERO_MV_CONTEXTS=2 ][ 3 ]. This repo's only reachable
+;; ZeroMvContext (use_ref_frame_mvs forced 0, see av1.frame-header) is 0.
+(def Default-Zero-Mv-Cdf
+  [[2175 32768 0] [1054 32768 0]])
+
+;; Default_Ref_Mv_Cdf[ REF_MV_CONTEXTS=6 ][ 3 ]. This repo's only reachable
+;; RefMvContext is 0 -- transcribed in full since ref_mv is read whenever
+;; zero_mv==1 (NEARESTMV/NEARMV), which av1.decode-block guards against
+;; (throws :unsupported-inter-y-mode) rather than silently mis-decoding, so
+;; this table documents the cdf that guard's error path would have needed.
+(def Default-Ref-Mv-Cdf
+  [[23974 32768 0] [24188 32768 0] [17848 32768 0] [28622 32768 0] [24312 32768 0] [19923 32768 0]])
+
+;; Default_Inter_Tx_Type_Set3_Cdf[ 4 ][ 3 ], indexed by Tx_Size_Sqr[txSz]
+;; (09.parsing.process.md "inter_tx_type": TileInterTxTypeSet3Cdf[
+;; Tx_Size_Sqr[txSz] ]) -- NOT by q_ctx_idx like the coefficient tables
+;; above. This repo's only inter tx size is TX_32X32, Tx_Size_Sqr[TX_32X32]
+;; == TX_32X32 == 3, so only row 3 is ever reached; rows 0..2 are
+;; transcribed for completeness.
+(def Default-Inter-Tx-Type-Set3-Cdf
+  [[16384 32768 0] [4167 32768 0] [1998 32768 0] [748 32768 0]])
+
+;; MV syntax CDF tables (spec #MV syntax / #MV component syntax,
+;; 09.parsing.process.md "mv_joint"/"mv_sign"/"mv_class"/"mv_class0_bit"/
+;; "mv_class0_fr"/"mv_class0_hp"/"mv_fr"/"mv_hp"/"mv_bit", 10.additional.
+;; tables.md, fetched 2026-07-13). Spec indexes several of these by
+;; `[MvCtx][comp]` (TileMvSignCdf[MvCtx][comp] etc.), but every one of the
+;; spec's own Default_Mv_*_Cdf tables that HAS a comp-like leading
+;; dimension (Default_Mv_Class_Cdf/Class0_Fr/Fr, all `[2][...]`) has
+;; byte-for-byte IDENTICAL rows for both entries (spot-checked, not
+;; assumed) -- so this repo stores the collapsed (comp-independent) shape
+;; below; av1.decode-block still threads `comp` (0=row/1=col) into the
+;; CDF-adaptation ctx-key it passes to read-cdf-symbol, so the two
+;; components' adapted state stays genuinely separate even though they
+;; start from the same default row.
+(def Default-Mv-Joint-Cdf [4096 11264 19328 32768 0])
+(def Default-Mv-Sign-Cdf [16384 32768 0])
+(def Default-Mv-Class-Cdf [28672 30976 31858 32320 32551 32656 32740 32757 32762 32767 32768 0])
+(def Default-Mv-Class0-Bit-Cdf [27648 32768 0])
+;; Default-Mv-Class0-Fr-Cdf indexed by class0_bit (0/1).
+(def Default-Mv-Class0-Fr-Cdf
+  [[16384 24576 26624 32768 0]
+   [12288 21248 24128 32768 0]])
+(def Default-Mv-Class0-Hp-Cdf [20480 32768 0])
+;; Default-Mv-Bit-Cdf indexed by the mv_bit loop position i (0..MV_OFFSET_BITS-1=9).
+(def Default-Mv-Bit-Cdf
+  [[17408 32768 0] [17920 32768 0] [18944 32768 0] [20480 32768 0] [22528 32768 0]
+   [24576 32768 0] [28672 32768 0] [29952 32768 0] [29952 32768 0] [30720 32768 0]])
+(def Default-Mv-Fr-Cdf [8192 17408 21248 32768 0])
+(def Default-Mv-Hp-Cdf [16384 32768 0])
+
+;; Tx_Type_Inter_Inv_Set3 (06.bitstream.syntax.md #Transform type syntax):
+;; maps the decoded inter_tx_type symbol (0/1) to the actual TxType, for
+;; TX_SET_INTER_3 (the only inter tx-type set this repo's TX_32X32-only
+;; inter scope can structurally select, per get_tx_set()). :IDTX is
+;; structurally reachable but out of scope (av1.transform has no
+;; identity-transform implementation) -- av1.decode-block throws if decoded.
+(def Tx-Type-Inter-Inv-Set3 [:IDTX :DCT_DCT])
+
