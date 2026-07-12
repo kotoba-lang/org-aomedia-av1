@@ -145,11 +145,38 @@
   ])
 
 ;; Default_Intra_Frame_Y_Mode_Cdf[abovemode=0][leftmode=0] row only
-;; (14 entries: 13-symbol cdf + adaptation counter) -- this repo's
-;; DC_PRED-only scope means every reachable ctx is always (0,0), see
-;; namespace docstring / av1.decode-block for why.
+;; (14 entries: 13-symbol cdf + adaptation counter) -- av1.decode-block
+;; properly computes the real (abovemode,leftmode) ctx from each leaf's
+;; actual neighbor YModes (via Intra-Mode-Context-Dc-V-H below) and throws
+;; if it's ever anything other than (0,0), since this is the only
+;; TileIntraFrameYModeCdf[abovemode][leftmode] entry transcribed (out of
+;; the full 5x5 abovemode/leftmode space -- see av1.decode-block namespace
+;; docstring).
 (def Default-Intra-Frame-Y-Mode-Cdf-0-0
   [15588 17027 19338 20218 20682 21110 21825 23244 24189 28165 29093 30466 32768 0])
+
+;; Intra_Mode_Context[INTRA_MODES] (09.parsing.process.md "intra_frame_y_mode"
+;; cdf selection), restricted to the indices av1.decode-block/read-y-mode can
+;; ever produce (DC_PRED=0, V_PRED=1, H_PRED=2 -- everything else already
+;; throws before this table would be consulted). Full spec table is
+;; `{0,1,2,3,4,4,4,4,3,0,1,2,0}`; only the first 3 entries are reachable
+;; here, so only those are transcribed.
+(def Intra-Mode-Context-Dc-V-H [0 1 2])
+
+;; MAX_ANGLE_DELTA / ANGLE_STEP (03.symbols.md) -- angle_delta_y's decoded
+;; symbol (0..2*MAX_ANGLE_DELTA) maps to AngleDeltaY = symbol - MAX_ANGLE_DELTA.
+(def MAX_ANGLE_DELTA 3)
+
+;; Default_Angle_Delta_Cdf[DIRECTIONAL_MODES][(2*MAX_ANGLE_DELTA+1)+1]
+;; (10.additional.tables.md), row-sliced to only the two entries
+;; av1.decode-block/read-angle-delta-y can ever consult: index 0
+;; (YMode-V_PRED for YMode==V_PRED) and index 1 (YMode-V_PRED for
+;; YMode==H_PRED) -- the full table has DIRECTIONAL_MODES==8 rows (also
+;; covering D45/D135/D113/D157/D203/D67), but av1.decode-block/read-y-mode
+;; already throws before any of those modes could reach this table.
+(def Default-Angle-Delta-Cdf
+  [[2180 5032 7567 22776 26989 30217 32768 0]
+   [2301 5608 8801 23487 26974 30330 32768 0]])
 
 ;; Default_Txb_Skip_Cdf[q-ctx-idx][TX_32X32][ctx][3], ctx = TXB_SKIP_CONTEXTS (13).
 (def Default-Txb-Skip-Cdf-32x32

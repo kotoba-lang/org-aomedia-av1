@@ -125,3 +125,107 @@
    `keyframe-32x32-gradient-golden-yuv` docstring for the same pattern."
   []
   (load-resource "av1/fixtures/keyframe-32x32-busy.dav1d.yuv"))
+
+(defn keyframe-64x64-vpred-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 64x64 MONOCHROME keyframe, Phase 1
+   mode-coverage extension fixture (ADR-2607122000 Migration step 9
+   continuation -- adds V_PRED/H_PRED to av1.decode-block's originally
+   DC_PRED-only scope). Unlike the 32x32 single-leaf fixtures above, this
+   is a real MULTI-leaf frame: one 64x64 superblock, forced via
+   `--min-partition-size=32 --max-partition-size=32` to split into exactly
+   4 BLOCK_32X32 leaves (top-left/top-right/bottom-left/bottom-right, in
+   that decode order), each still exactly TX_32X32/DCT_DCT per this
+   namespace's per-block scope -- av1.decode-block's decode-block-fn
+   requires no changes to handle multiple leaves since av1.tile-group's
+   decode-partition/MiSizes-grid tracking was already generic.
+
+   Content is authored directly as known raw pixel bytes (not a lavfi
+   filter), designed so a real, non-fabricated encoder RD decision
+   reliably lands on this exact shape (verified empirically, see
+   `test/av1/decode_block_test.clj`):
+
+     - top-left: FLAT constant 128 (no neighbors available at all --
+       forces DC_PRED trivially, AND -- because DC_PRED's have-one-
+       neighbor-only average of a uniformly flat region is provably
+       IDENTICAL to V_PRED/H_PRED's have-one-neighbor-only fallback value
+       for that same flat region -- also forces top-right and bottom-left
+       to tie-break to DC_PRED on cheaper signaling cost, regardless of
+       their OWN authored content).
+     - top-right and bottom-right: both f(x) = 128 + round(40*sin(2*pi*
+       (x-32)/32)), invariant along y (x in [32,63]). Since bottom-right
+       has a REAL avail-above neighbor (top-right, already reconstructed
+       with the identical column profile), V_PRED gives near-zero
+       residual there versus DC_PRED's single blended average -- real RD
+       incentive, not a coin flip.
+     - bottom-left: an independent 2D gradient/busy-style pattern (same
+       family as `keyframe-32x32-gradient-bytes`) -- reliably DC_PRED via
+       the flat-top-left tie-break above, regardless of its own content.
+
+   aomenc invocation (adds `--enable-directional-intra=1
+   --enable-diagonal-intra=0` -- a libaom flag that permits V_PRED/H_PRED
+   specifically while keeping every *diagonal* directional mode D45..D203
+   disabled -- to the same disabled-everything-else baseline as the
+   32x32 fixtures, plus `--min-partition-size=32 --max-partition-size=32`
+   to force the 2x2 BLOCK_32X32 split deterministically rather than
+   relying on the encoder's partition RDO):
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=0 --enable-directional-intra=1 \\
+       --enable-diagonal-intra=0 --enable-angle-delta=0 --enable-intrabc=0 \\
+       --enable-palette=0 --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --min-partition-size=32 --max-partition-size=32 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-64x64-vpred.obu keyframe-64x64-vpred.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-64x64-vpred.obu -o
+   keyframe-64x64-vpred.dav1d.yuv` (dav1d 1.5.3) produced the raw 8-bit
+   gray 64x64 luma plane checked in as `keyframe-64x64-vpred.dav1d.yuv`.
+   Empirically confirmed (see test/av1/decode_block_test.clj): all 4
+   leaves are BLOCK_32X32/PARTITION_NONE/TX_32X32, top-left/top-right/
+   bottom-left decode to y-mode DC_PRED (0), and bottom-right decodes to
+   y-mode V_PRED (1) -- i.e. the real encoder genuinely chose V_PRED for
+   this block, not merely a value this repo assumed."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-vpred.obu"))
+
+(defn keyframe-64x64-vpred-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-64x64-vpred-bytes` -- see its
+   docstring."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-vpred.dav1d.yuv"))
+
+(defn keyframe-64x64-hpred-bytes
+  "Same construction as `keyframe-64x64-vpred-bytes` (see its docstring for
+   the full aomenc invocation/scope rationale), transposed to steer
+   bottom-right to H_PRED instead of V_PRED:
+
+     - top-left: FLAT constant 128 (same tie-breaking role as the vpred
+       fixture -- forces top-right and bottom-left to DC_PRED regardless
+       of their own content).
+     - top-right: an independent 2D gradient/busy-style pattern (plays the
+       role `bottom-left` played in the vpred fixture) -- DC_PRED via the
+       flat-top-left tie-break.
+     - bottom-left and bottom-right: both g(y) = 128 + round(40*sin(2*pi*
+       (y-32)/32)), invariant along x (y in [32,63]). bottom-right has a
+       REAL avail-left neighbor (bottom-left, already reconstructed with
+       the identical row profile), so H_PRED gives near-zero residual
+       there versus DC_PRED's blended average.
+
+   Generated 2026-07-13 the same way (aomenc 3.14.1 / dav1d 1.5.3
+   cross-check, identical flags to the vpred fixture except content).
+   Empirically confirmed: all 4 leaves are BLOCK_32X32/PARTITION_NONE/
+   TX_32X32, top-left/top-right/bottom-left decode to y-mode DC_PRED (0),
+   and bottom-right decodes to y-mode H_PRED (2)."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-hpred.obu"))
+
+(defn keyframe-64x64-hpred-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-64x64-hpred-bytes` -- see its
+   docstring."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-hpred.dav1d.yuv"))

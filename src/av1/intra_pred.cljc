@@ -1,16 +1,57 @@
 (ns av1.intra-pred
-  "AV1 DC intra prediction process, transcribed from AV1 Bitstream &
-   Decoding Process Specification section 7.11.2 (\"Intra prediction
-   process\") / 7.11.2.5 (\"DC intra prediction process\") --
-   AOMediaCodec/av1-spec master, 08.decoding.process.md #Intra prediction
-   process / #DC intra prediction process (fetched 2026-07-13).
+  "AV1 intra prediction processes, transcribed from AV1 Bitstream & Decoding
+   Process Specification section 7.11.2 (\"Intra prediction process\") --
+   7.11.2.5 (\"DC intra prediction process\") and 7.11.2.4 (\"Directional
+   intra prediction process\", V_PRED/H_PRED cases only) -- AOMediaCodec/
+   av1-spec master, 08.decoding.process.md #Intra prediction process / #DC
+   intra prediction process / #Directional intra prediction process
+   (fetched 2026-07-13, DC_PRED originally; V_PRED/H_PRED addition fetched
+   again 2026-07-13 for the Phase 1 mode-coverage extension below).
 
    SCOPE (Phase 1 continuation, ADR-2607122000 Migration step 9 -- see
    av1.decode-block namespace docstring for the full scope statement):
-   DC_PRED only (mode is not a parameter here -- av1.decode-block throws
-   before calling this namespace for any other intra mode). 8-bit only.
+   DC_PRED / V_PRED / H_PRED only (mode is not always a parameter here for
+   dc-predict, which keeps its original narrow signature; v-predict/
+   h-predict below are the new entry points -- av1.decode-block throws
+   before calling this namespace for any other intra mode: D45/D135/D113/
+   D157/D203/D67/SMOOTH*/PAETH are all still out of scope). 8-bit only.
    Luma-only (plane is implicit -- caller passes the plane's own pixel
-   buffer)."
+   buffer).
+
+   V_PRED (mode 1, Mode_To_Angle[V_PRED] == 90) and H_PRED (mode 2,
+   Mode_To_Angle[H_PRED] == 180) are technically routed through the spec's
+   general \"directional intra prediction process\" (7.11.2.4, since
+   is_directional_mode(V_PRED) and is_directional_mode(H_PRED) are both
+   true), not through a dedicated non-directional formula the way DC_PRED
+   is -- but this repo only ever exercises them with AngleDeltaY forced to
+   0. IMPORTANT (corrected 2026-07-13 after a real-data bit-exactness
+   failure): `--enable-angle-delta=0` does NOT remove `angle_delta_y` from
+   the bitstream -- intra_angle_info_y() is called UNCONDITIONALLY by
+   intra_frame_mode_info() whenever is_directional_mode(YMode) is true,
+   with no enable_angle_delta gate at all (that flag only biases the
+   ENCODER's search to always choose the zero-offset symbol). An earlier
+   revision of this namespace incorrectly assumed the read could be
+   skipped entirely, which desynced every subsequent bit in a V_PRED/
+   H_PRED block. `av1.decode-block/read-angle-delta-y` now performs the
+   real symbol read (`TileAngleDeltaCdf[YMode-V_PRED]`) and *asserts*
+   (throws if false) that the decoded AngleDeltaY is 0, rather than
+   assuming it -- so the pAngle-exactly-90/180 derivation below is now a
+   verified precondition, not an unread assumption. At pAngle exactly 90 or 180, 7.11.2.4's steps
+   10/11 apply directly (`pred[i][j] = AboveRow[j]` / `pred[i][j] =
+   LeftCol[i]`, no per-sample angle/base/shift math needed), AND -- proven
+   by inspecting 7.11.2.4 step 4 together with 7.11.2.10's edge-upsample
+   selection formula (`d = Abs(delta); if (d<=0 || d>=40) useUpsample=0`) --
+   neither intra edge filtering (7.11.2.4 step 4's inner filter branch is
+   gated on `pAngle != 90 && pAngle != 180`, so it never runs for our
+   pAngle) nor intra edge upsampling (delta = pAngle-90 = 0 or pAngle-180 =
+   0 in both calls, so d=0 forces useUpsample=0 regardless of
+   enable_intra_edge_filter/filterType) ever modifies AboveRow/LeftCol for
+   these two exact angles -- so v-predict/h-predict below can validly copy
+   AboveRow[j]/LeftCol[i] unmodified, without needing to implement filter
+   corner / intra filter type / intra edge filter / intra edge upsample at
+   all. This is a structural guarantee for pAngle==90/180 specifically, not
+   an approximation -- see the namespace's git history / ADR-2607122000
+   Migration step 9 continuation notes for the derivation."
   )
 
 (defn dc-predict
@@ -58,3 +99,71 @@
           :else
           (bit-shift-left 1 (dec bit-depth)))]
     (vec (repeat (* w h) dc-val))))
+
+;; ---------------------------------------------------------------------
+;; Shared AboveRow[k]/LeftCol[k] accessors (spec 7.11.2 general "Intra
+;; prediction process", the AboveRow[i]/LeftCol[i] for i=0..w+h-1
+;; derivations) -- used by v-predict/h-predict below. haveAboveRight and
+;; haveBelowLeft are always false in this repo's scope (no multi-block
+;; frame this phase validates ever constructs them -- see av1.decode-block
+;; namespace docstring), which only affects aboveLimit/leftLimit's clamp
+;; range; since v-predict/h-predict only ever read AboveRow[0..w-1]/
+;; LeftCol[0..h-1] (never the extended w..w+h-1 range that
+;; haveAboveRight/haveBelowLeft would extend), this simplification is
+;; exact for these two modes regardless.
+
+(defn- above-row-fn
+  "Returns `(fn [k] AboveRow[k])` for k=0..w-1, per spec 7.11.2's AboveRow
+   derivation (haveAboveRight forced false, see above)."
+  [frame frame-w x y have-left? have-above? w bit-depth]
+  (cond
+    (and (not have-above?) have-left?)
+    (let [v (nth frame (+ (* y frame-w) (dec x)))] (constantly v))
+
+    (and (not have-above?) (not have-left?))
+    (constantly (dec (bit-shift-left 1 (dec bit-depth))))
+
+    :else
+    (let [max-x (dec frame-w)
+          above-limit (min max-x (+ x w -1))]
+      (fn [k] (nth frame (+ (* (dec y) frame-w) (min above-limit (+ x k))))))))
+
+(defn- left-col-fn
+  "Returns `(fn [k] LeftCol[k])` for k=0..h-1, per spec 7.11.2's LeftCol
+   derivation (haveBelowLeft forced false, see above)."
+  [frame frame-w frame-h x y have-left? have-above? h bit-depth]
+  (cond
+    (and (not have-left?) have-above?)
+    (let [v (nth frame (+ (* (dec y) frame-w) x))] (constantly v))
+
+    (and (not have-left?) (not have-above?))
+    (constantly (inc (bit-shift-left 1 (dec bit-depth))))
+
+    :else
+    (let [max-y (dec frame-h)
+          left-limit (min max-y (+ y h -1))]
+      (fn [k] (nth frame (+ (* (min left-limit (+ y k)) frame-w) (dec x)))))))
+
+(defn v-predict
+  "spec 7.11.2.4 step 10 (pAngle == 90): pred[i][j] = AboveRow[j] for all i
+   -- valid for V_PRED given this namespace's scope (AngleDeltaY forced 0,
+   see namespace docstring for why edge filter/upsample never apply here).
+   Same parameter shape as `dc-predict`/`h-predict` (including the unused
+   `_frame-h` -- V_PRED only ever reads AboveRow, which doesn't need
+   frame-h's max-y clipping the way LeftCol does)."
+  [frame frame-w _frame-h x y have-left? have-above? log2W log2H bit-depth]
+  (let [w (bit-shift-left 1 log2W)
+        h (bit-shift-left 1 log2H)
+        ar (above-row-fn frame frame-w x y have-left? have-above? w bit-depth)
+        row (mapv ar (range w))]
+    (vec (mapcat (fn [_i] row) (range h)))))
+
+(defn h-predict
+  "spec 7.11.2.4 step 11 (pAngle == 180): pred[i][j] = LeftCol[i] for all j
+   -- valid for H_PRED given this namespace's scope (AngleDeltaY forced 0,
+   see namespace docstring). Same parameter shape as `dc-predict` above."
+  [frame frame-w frame-h x y have-left? have-above? log2W log2H bit-depth]
+  (let [w (bit-shift-left 1 log2W)
+        h (bit-shift-left 1 log2H)
+        lc (left-col-fn frame frame-w frame-h x y have-left? have-above? h bit-depth)]
+    (vec (mapcat (fn [i] (repeat w (lc i))) (range h)))))
