@@ -300,6 +300,43 @@ handle pAngle exactly 90/180, throwing otherwise), any transform size
 other than TX_32X32, ADST/IDTX/FLIPADST transform types, chroma planes,
 and inter prediction.
 
+### Partition scope boundary (`av1.decode-block-test`, `keyframe-64x64-split16`)
+
+The two extensions above (single-leaf DC_PRED, then real multi-leaf
+DC_PRED/V_PRED/H_PRED) both stay at exactly BLOCK_32X32/TX_32X32 per leaf.
+This fixture validates the *boundary* of that scope against a REAL encoded
+stream, rather than only via direct table lookup: `keyframe-64x64-split16.obu`
+is a real aomenc-encoded 64x64 monochrome keyframe forced (via
+`--min-partition-size=16 --max-partition-size=16`) two real recursion
+levels deep (64x64 -> 32x32 -> 16x16, each level a genuinely coded
+`partition` symbol, not a zero-bit structural forcing). Confirmed (not
+assumed): `av1.tile-group/decode-partition`'s first bit-exact-valid leaf is
+BLOCK_16X16/PARTITION_NONE at (0,0), and wiring `av1.decode-block`'s
+`decode-block-fn` in to decode this same real bitstream throws `ex-info`
+(`:reason :unsupported-tx-size`, `:mi-size` BLOCK_16X16, `:tx-size`
+TX_16X16) at exactly that leaf -- i.e. `av1.decode-block`'s scope guard for
+non-BLOCK_32X32 leaves (any deeper `PARTITION_SPLIT` recursion, or a
+`PARTITION_HORZ`/`PARTITION_VERT` rectangular leaf, since neither maps to
+`Max_Tx_Size_Rect[MiSize] == TX_32X32`) is exercised end-to-end against a
+real bitstream and fails safely (a clear `ex-info`, not a silent
+mis-decode or an uncontrolled crash) rather than merely being asserted by
+inspecting `av1.tables/Max-Tx-Size-Rect` directly. See
+`test/av1/fixtures.clj`/`test/av1/decode_block_test.clj`
+(`split16-throws-on-block16x16-test`) for the exact aomenc invocation and
+assertions.
+
+Extending real reconstruction to cover these deeper/rectangular leaf
+shapes (BLOCK_16X16 and smaller, and the rectangular HORZ/VERT/HORZ_A/
+HORZ_B/VERT_A/VERT_B/HORZ_4/VERT_4 leaf shapes) is next-phase work: it
+needs both a non-TX_32X32 `get_tx_set()`/dequant/inverse-transform path
+(TX_16X16 alone is DCT_DCT-safe per `get_tx_set()`'s rules the same way
+TX_32X32 is, so that specific combination could land without ADST, but
+rectangular tx sizes/other square sizes below TX_32X32 are not
+structurally DCT_DCT-guaranteed and would need `get_tx_set()`'s general
+case plus ADST support) -- deliberately not pursued in this pass per this
+repo's practice of landing one narrow, fully-validated extension at a
+time rather than spreading across scope axes.
+
 ## Usage
 
 ```clojure

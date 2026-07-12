@@ -26,7 +26,15 @@
    LeftDcContext via `get-dc-sign-ctx`, footprint-wide grid writes via
    `record-footprint!`) for the first time -- see test/av1/fixtures.clj's
    docstrings for the content design and av1.decode-block's namespace
-   docstring for the exact scope boundary."
+   docstring for the exact scope boundary.
+
+   `keyframe-64x64-split16` (Migration step 9 continuation, real-partition
+   scope-boundary regression) validates that when a real bitstream's
+   decode_partition() recursion goes deeper than BLOCK_32X32 (forced via
+   `--min-partition-size=16 --max-partition-size=16` to reach BLOCK_16X16),
+   av1.decode-block's tx-size scope guard rejects it with ex-info against
+   REAL encoded bits, rather than only in a synthetic/direct-table-lookup
+   unit test -- see test/av1/fixtures.clj's docstring."
   (:require [clojure.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
@@ -212,6 +220,56 @@
               independent decode (no tolerance)"
       (is (= 4096 (count luma-plane)))
       (is (= golden luma-plane)))))
+
+(deftest split16-throws-on-block16x16-test
+  (testing "av1.tile-group/decode-partition's real recursion genuinely
+            reaches a BLOCK_16X16 leaf against a REAL encoded stream
+            (keyframe-64x64-split16.obu, forced --min-partition-size=16
+            --max-partition-size=16 -- see test/av1/fixtures.clj docstring),
+            and av1.decode-block's tx-size scope guard rejects it with
+            ex-info instead of mis-decoding or crashing uncontrolled"
+    (let [bytes (fixtures/keyframe-64x64-split16-bytes)
+          seq-obu (find-obu bytes :obu-sequence-header)
+          seq-hdr (sh/parse (:reader-at-payload seq-obu))
+          frame-obu (find-obu bytes :obu-frame)
+          frame-hdr (fh/parse (:reader-at-payload frame-obu) seq-hdr)]
+      (testing "frame geometry: 64x64, TX_MODE_LARGEST"
+        (is (= 64 (:frame-width frame-hdr)))
+        (is (= 64 (:frame-height frame-hdr)))
+        (is (= :tx-mode-largest (:tx-mode frame-hdr))))
+      (testing "WITHOUT decode-block-fn wired in, the first leaf
+                decode_partition() reaches (bit-exact-valid up to this
+                point, per av1.tile-group's namespace docstring -- every
+                leaf after the first is not, since decode_block() was never
+                called to consume its bits) is genuinely BLOCK_16X16/
+                PARTITION_NONE at (0,0) -- confirms the real bitstream's
+                forced recursion depth (64x64 -> 32x32 -> 16x16, two real
+                partition-symbol reads) rather than assuming it"
+        (let [result (tg/parse-frame-obu frame-obu seq-hdr)
+              tile (first (:tiles (:tile-group result)))
+              first-leaf (some (fn find-leaf [node]
+                                  (if (:leaf node)
+                                    node
+                                    (when (:children node) (some find-leaf (:children node)))))
+                                (:superblock-partitions tile))]
+          (is (= 0 (:r first-leaf)))
+          (is (= 0 (:c first-leaf)))
+          (is (= tg/BLOCK_16X16 (:b-size first-leaf)))
+          (is (= tg/PARTITION_NONE (:partition first-leaf)))))
+      (testing "WITH decode-block-fn wired in (av1.decode-block/make-decode-block-fn),
+                decoding this same real bitstream throws ex-info at that
+                first leaf -- reason :unsupported-tx-size, mi-size
+                BLOCK_16X16, tx-size TX_16X16 -- rather than silently
+                mis-decoding a leaf shape this namespace doesn't support"
+        (let [decode-block-fn (db/make-decode-block-fn frame-hdr seq-hdr)]
+          (try
+            (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn})
+            (is false "expected ex-info to be thrown, but decode completed without throwing")
+            (catch clojure.lang.ExceptionInfo e
+              (is (re-find #"only TX_32X32 is a supported transform size" (.getMessage e)))
+              (is (= :unsupported-tx-size (:reason (ex-data e))))
+              (is (= tg/BLOCK_16X16 (:mi-size (ex-data e))))
+              (is (= 2 (:tx-size (ex-data e))) "TX_16X16"))))))))
 
 (deftest guard-frame-scope-throws-test
   (testing "make-decode-block-fn rejects out-of-scope frame headers instead

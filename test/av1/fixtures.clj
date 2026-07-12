@@ -229,3 +229,58 @@
    docstring."
   []
   (load-resource "av1/fixtures/keyframe-64x64-hpred.dav1d.yuv"))
+
+(defn keyframe-64x64-split16-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 64x64 MONOCHROME keyframe,
+   deliberately forced two levels deep into decode_partition()'s recursion
+   (ADR-2607122000 Migration step 9 continuation -- the multi-leaf
+   scope-boundary regression fixture): `--min-partition-size=16
+   --max-partition-size=16` forces every superblock decision down to
+   exactly BLOCK_16X16 (real, normally-signaled `partition` symbol reads at
+   both the 64x64->32x32 and 32x32->16x16 levels -- neither is a zero-bit
+   structural forcing the way `keyframe-32x32-split.obu`'s MiRows==MiCols==8
+   trick is; both symbols are genuinely coded because PARTITION_SPLIT is
+   still one of several syntactically legal values at each level, merely
+   the only one the `--max-partition-size` constraint lets the encoder's RD
+   search choose), unlike `keyframe-64x64-vpred/hpred.obu` above which only
+   forces ONE level (64x64->32x32, landing exactly on this namespace's
+   supported BLOCK_32X32 leaf size). Content is flat 8-bit gray 128
+   (authored directly as a raw y4m frame, C420jpeg chroma planes filled
+   with 128 and ignored by the `--monochrome` encode) -- this fixture
+   exists to validate CONTROL FLOW (av1.tile-group/decode-partition's real
+   recursion depth and av1.decode-block's out-of-scope tx-size guard), not
+   pixel reconstruction, so trivial flat content is sufficient (no bit-exact
+   golden comparison is made against this fixture; see
+   test/av1/decode_block_test.clj's `split16-throws-on-block16x16-test`).
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=0 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --min-partition-size=16 --max-partition-size=16 \\
+       --obu -o keyframe-64x64-split16.obu keyframe-64x64-split16.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Empirically
+   confirmed (see test/av1/decode_block_test.clj): WITHOUT a
+   `:decode-block-fn` wired in, av1.tile-group/decode-partition's first
+   real (bit-exact-valid -- i.e. before decode_block()'s bit consumption
+   would desync anything further, per that namespace's docstring)
+   `:superblock-partitions` leaf lands at (r=0,c=0), `:b-size` ==
+   BLOCK_16X16, `:partition` == PARTITION_NONE -- i.e. the real encoder's
+   forced recursion genuinely reaches a BLOCK_16X16 leaf, not merely a
+   value this repo assumed. WITH `av1.decode-block/make-decode-block-fn`
+   wired in, decoding this same real bitstream throws `ex-info`
+   (`:reason :unsupported-tx-size`, `:mi-size` == BLOCK_16X16, `:tx-size`
+   == TX_16X16) at exactly that first leaf, rather than mis-decoding or
+   crashing uncontrolled -- av1.decode-block's `tx-size-for` scope guard
+   (see its docstring) is exercised against a REAL encoded stream here for
+   the first time (previously only reachable via direct unit-level
+   `Max-Tx-Size-Rect` table inspection, not an actual decode_partition()
+   walk over real bits)."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-split16.obu"))
