@@ -16,13 +16,14 @@
 
    SCOPE (Phase 1 continuation, ADR-2607122000 Migration step 9 -- see
    av1.decode-block namespace docstring for the full scope statement):
-   DC_PRED / V_PRED / H_PRED / PAETH_PRED only (mode is not always a
-   parameter here for dc-predict, which keeps its original narrow
-   signature; v-predict/h-predict/paeth-predict below are the other entry
-   points -- av1.decode-block throws before calling this namespace for any
-   other intra mode: D45/D135/D113/D157/D203/D67/SMOOTH* are all still out
-   of scope). 8-bit only. Luma-only (plane is implicit -- caller passes the
-   plane's own pixel buffer).
+   DC_PRED / V_PRED / H_PRED / PAETH_PRED / SMOOTH_PRED only (mode is not
+   always a parameter here for dc-predict, which keeps its original narrow
+   signature; v-predict/h-predict/paeth-predict/smooth-predict below are
+   the other entry points -- av1.decode-block throws before calling this
+   namespace for any other intra mode: D45/D135/D113/D157/D203/D67/
+   SMOOTH_V_PRED/SMOOTH_H_PRED are all still out of scope). 8-bit only.
+   Luma-only (plane is implicit -- caller passes the plane's own pixel
+   buffer).
 
    PAETH_PRED (mode 12) is, per spec 08.decoding.process.md's general
    \"Intra prediction process\" mode dispatch, NOT routed through the
@@ -71,8 +72,25 @@
    corner / intra filter type / intra edge filter / intra edge upsample at
    all. This is a structural guarantee for pAngle==90/180 specifically, not
    an approximation -- see the namespace's git history / ADR-2607122000
-   Migration step 9 continuation notes for the derivation."
-  )
+   Migration step 9 continuation notes for the derivation.
+
+   SMOOTH_PRED (mode 9, added by the SMOOTH mode-coverage extension, fetched
+   2026-07-13 for the general \"Smooth intra prediction process\" section,
+   08.decoding.process.md, and its Sm_Weights_Tx_* weight tables,
+   10.additional.tables.md -- see av1.tables namespace docstring's
+   Sm-Weights section for the two-source cross-check discipline used for
+   those tables): like PAETH_PRED, NOT a directional mode
+   (is_directional_mode(SMOOTH_PRED) is false -- SMOOTH_PRED/SMOOTH_V_PRED/
+   SMOOTH_H_PRED all go to the spec's own dedicated \"Smooth intra
+   prediction process\", 7.11.2.6, never the directional process 7.11.2.4),
+   so av1.decode-block's existing `(contains? #{V_PRED H_PRED} y-mode)`
+   angle-delta gate already correctly excludes it with no code change
+   needed (same reasoning as PAETH_PRED's docstring section above).
+   SMOOTH_V_PRED/SMOOTH_H_PRED (the two 1D-blend simplifications of
+   SMOOTH_PRED, 7.11.2.6's second/third bullets) are explicitly OUT of
+   scope for this extension -- only the two-edge SMOOTH_PRED case is
+   implemented, see `smooth-predict` below."
+  (:require [av1.tables :as tables]))
 
 (defn dc-predict
   "spec 7.11.2.5: DC intra prediction. `frame` is a row-major flat vector of
@@ -241,3 +259,57 @@
                (and (<= p-left p-top) (<= p-left p-topleft)) left
                (<= p-top p-topleft) above
                :else corner))))))
+
+;; ---------------------------------------------------------------------
+;; SMOOTH_PRED (spec 7.11.2.6 "Smooth intra prediction process", the
+;; SMOOTH_PRED case of its three-way mode dispatch -- SMOOTH_V_PRED/
+;; SMOOTH_H_PRED are out of scope, see namespace docstring's SMOOTH
+;; section). Reuses the shared above-row-fn/left-col-fn accessors exactly
+;; like paeth-predict does: smooth-predict only ever reads
+;; AboveRow[0..w-1]/LeftCol[0..h-1] (plus AboveRow[w-1]/LeftCol[h-1],
+;; already within that same 0..w-1/0..h-1 range -- no extended w..w+h-1
+;; access is needed), so those helpers' haveAboveRight/haveBelowLeft-
+;; forced-false simplification is exact here too.
+
+(defn- sm-weights-for
+  "tables/Sm-Weights-Tx-* selected by log2W/log2H, per spec 7.11.2.6 step
+   1/2's dispatch table (log2 2/3/4/5/6 -> 4x4/8x8/16x16/32x32/64x64)."
+  [log2]
+  (case (long log2)
+    2 tables/Sm-Weights-Tx-4x4
+    3 tables/Sm-Weights-Tx-8x8
+    4 tables/Sm-Weights-Tx-16x16
+    5 tables/Sm-Weights-Tx-32x32
+    6 tables/Sm-Weights-Tx-64x64))
+
+(defn smooth-predict
+  "spec 7.11.2.6 \"Smooth intra prediction process\", SMOOTH_PRED case: for
+   each i=0..h-1, j=0..w-1,
+
+     smoothPred = smWeightsY[i]*AboveRow[j] + (256-smWeightsY[i])*LeftCol[h-1]
+                + smWeightsX[j]*LeftCol[i]  + (256-smWeightsX[j])*AboveRow[w-1]
+     pred[i][j] = Round2(smoothPred, 9)
+
+   where smWeightsX/smWeightsY are `sm-weights-for` of log2W/log2H
+   respectively. Same parameter shape as dc-predict/v-predict/h-predict/
+   paeth-predict above."
+  [frame frame-w frame-h x y have-left? have-above? log2W log2H bit-depth]
+  (let [w (bit-shift-left 1 log2W)
+        h (bit-shift-left 1 log2H)
+        ar (above-row-fn frame frame-w x y have-left? have-above? w bit-depth)
+        lc (left-col-fn frame frame-w frame-h x y have-left? have-above? h bit-depth)
+        sm-weights-x (sm-weights-for log2W)
+        sm-weights-y (sm-weights-for log2H)
+        above-right (ar (dec w))
+        left-bottom (lc (dec h))
+        round2-9 (fn [v] (bit-shift-right (+ v 256) 9))]
+    (vec (for [i (range h) j (range w)]
+           (let [above (ar j)
+                 left (lc i)
+                 wy (nth sm-weights-y i)
+                 wx (nth sm-weights-x j)
+                 smooth-pred (+ (* wy above)
+                                (* (- 256 wy) left-bottom)
+                                (* wx left)
+                                (* (- 256 wx) above-right))]
+             (round2-9 smooth-pred))))))

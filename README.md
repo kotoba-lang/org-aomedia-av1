@@ -20,7 +20,8 @@ Cb/Cr) reconstruction against real encoded data, deliberately scoped narrow
 (see `av1.decode-block`'s namespace docstring for the exact boundary:
 BLOCK_32X32 leaves (single- or, for the V_PRED/H_PRED mode-coverage
 extension below, real multi-leaf) / TX_32X32 / DCT_DCT / DC_PRED+V_PRED+
-H_PRED+PAETH_PRED (per the PAETH mode-coverage extension below) for luma;
+H_PRED+PAETH_PRED+SMOOTH_PRED (per the PAETH/SMOOTH mode-coverage
+extensions below) for luma;
 TX_16X16 / DCT_DCT / UV_DC_PRED-only, 4:2:0, single- or (per
 the multi-leaf-chroma extension below, for the simple 1:1 luma-leaf/chroma-
 block correspondence only) multi-leaf for chroma). AV1's spec is far larger than H.264's, so
@@ -50,9 +51,9 @@ reconstruction namespaces added below):
 | `av1.frame-header` | **the full `uncompressed_header()`**, intra frames only (`KEY_FRAME`/`INTRA_ONLY_FRAME`): frame_type/show_frame/showable_frame, frame size (`frame_size()`/`superres_params()`/`render_size()`), `tile_info()`, `quantization_params()`, `segmentation_params()`, `delta_q_params()`/`delta_lf_params()`, the `CodedLossless`/`AllLossless` computation, `loop_filter_params()`, `cdef_params()`, `lr_params()`, `read_tx_mode()`, `frame_reference_mode()`/`skip_mode_params()`/`global_motion_params()` (all zero-bit passthroughs since FrameIsIntra is always 1 in this phase's scope), `reduced_tx_set`, and `film_grain_params()`. Also now carries `use-128x128-superblock`/`mono-chrome`/`num-planes`/`subsampling-x`/`subsampling-y` through to the top-level returned map (bugfix, see below) |
 | `av1.bool-decoder` | the AV1 "Symbol decoder" (daala-derived non-binary arithmetic coder, spec 8.2): `init_symbol`/`read_bool`/`read_literal`/`read_symbol`/`exit_symbol` with CDF adaptation. Wholly separate implementation from H.264's CAVLC/CABAC (`h264.cavlc`) -- different coding scheme entirely |
 | `av1.tile-group` | `tile_group_obu()`'s entry (tile start/end, per-tile `init_symbol`/`exit_symbol`) + `decode_partition()` (spec 5.11.4) fully implemented: real default CDF tables (`Default_Partition_W8/W16/W32/W64/W128_Cdf`), real `partition`/`split_or_horz`/`split_or_vert` context derivation (AvailU/AvailL via a MiSizes grid this namespace maintains), real bool-decoder symbol reads -- down to every leaf partition. `decode_block()` is now called at every leaf **when the caller supplies** an injectable `:decode-block-fn` (see `av1.decode-block` below) -- existing callers that don't supply one keep the original "leaf recorded, no further bits consumed" behavior this namespace has always documented |
-| `av1.tables` | AV1 constant tables for coefficient decode/dequant/inverse transform/intra prediction: `Dc-Qlookup-8bit`/`Ac-Qlookup-8bit` (8-bit dequant lookup), `Cos128-Lookup`, `Default-Scan-32x32`, `Intra-Mode-Context-Dc-V-H`/`MAX_ANGLE_DELTA`/`Default-Angle-Delta-Cdf` (mode-coverage extension, see below), and the `Default_*_Cdf` tables (`Skip`/`Intra-Frame-Y-Mode`/`Txb-Skip`/`Eob-Pt-1024`/`Eob-Extra`/`Dc-Sign`/`Coeff-Base-Eob`/`Coeff-Base`/`Coeff-Br`) sliced to this phase's supported scope (TX_32X32 only, luma only). Chroma extension (see below): the SAME q-ctx-idx x TX_16X16 x chroma(ptype=1) slices of those same spec tables (`Default-Txb-Skip-Cdf-16x16-Chroma`/`Default-Eob-Pt-256-Cdf-Chroma`/`Default-Eob-Extra-Cdf-16x16-Chroma`/`Default-Dc-Sign-Cdf-Chroma`/`Default-Coeff-Base-Eob-Cdf-16x16-Chroma`/`Default-Coeff-Base-Cdf-16x16-Chroma`/`Default-Coeff-Br-Cdf-16x16-Chroma`), plus `Default-Scan-16x16` and `Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H` (see namespace docstring's chroma section for exactly how each was extracted/spot-checked) |
+| `av1.tables` | AV1 constant tables for coefficient decode/dequant/inverse transform/intra prediction: `Dc-Qlookup-8bit`/`Ac-Qlookup-8bit` (8-bit dequant lookup), `Cos128-Lookup`, `Default-Scan-32x32`, `Intra-Mode-Context-Dc-V-H`/`MAX_ANGLE_DELTA`/`Default-Angle-Delta-Cdf` (mode-coverage extension, see below), `Sm-Weights-Tx-4x4`/`8x8`/`16x16`/`32x32`/`64x64` (SMOOTH mode-coverage extension, see below), and the `Default_*_Cdf` tables (`Skip`/`Intra-Frame-Y-Mode`/`Txb-Skip`/`Eob-Pt-1024`/`Eob-Extra`/`Dc-Sign`/`Coeff-Base-Eob`/`Coeff-Base`/`Coeff-Br`) sliced to this phase's supported scope (TX_32X32 only, luma only). Chroma extension (see below): the SAME q-ctx-idx x TX_16X16 x chroma(ptype=1) slices of those same spec tables (`Default-Txb-Skip-Cdf-16x16-Chroma`/`Default-Eob-Pt-256-Cdf-Chroma`/`Default-Eob-Extra-Cdf-16x16-Chroma`/`Default-Dc-Sign-Cdf-Chroma`/`Default-Coeff-Base-Eob-Cdf-16x16-Chroma`/`Default-Coeff-Base-Cdf-16x16-Chroma`/`Default-Coeff-Br-Cdf-16x16-Chroma`), plus `Default-Scan-16x16` and `Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H` (see namespace docstring's chroma section for exactly how each was extracted/spot-checked) |
 | `av1.transform` | dequantization (`dequantize`) + the AV1 inverse DCT (`inverse-dct!`, spec 7.13.2.3's generic butterfly-network algorithm, transcribed in full for n=2..6/TX_4X4..TX_64X64) + the 2D inverse transform process (`inverse-transform-2d`, row transform -> clip -> column transform) -- already fully generic over transform size, so the chroma extension below (TX_16X16) needed NO changes here at all: `inverse-dct!`'s n=4 branch and `dq-denom`'s TX_16X16 case were already transcribed in full generality alongside luma's n=5/TX_32X32 (only n=5/TX_32X32 was exercised against real data before the chroma extension; n=4/TX_16X16 now is too) |
-| `av1.intra-pred` | DC/V/H/PAETH intra prediction (`dc-predict`/`v-predict`/`h-predict`/`paeth-predict`, spec 7.11.2.4/7.11.2.5/7.11.2.2) -- DC's all four haveLeft/haveAbove cases implemented (though the original single-block fixtures only exercise the "neither available" case); V_PRED/H_PRED added in the mode-coverage extension below, both exercised against real multi-leaf data with a genuine avail-above/avail-left neighbor (not just the degenerate no-neighbor fallback); PAETH_PRED added in the PAETH mode-coverage extension below (the first mode here needing the topleft-corner `AboveRow[-1]`/`LeftCol[-1]` sample, via the new `above-row-corner` helper), also exercised against real multi-leaf data. `dc-predict` is plane-agnostic (frame-w/frame-h/x/y/log2W/log2H are all caller-supplied), so the chroma extension below reuses it as-is for UV_DC_PRED -- no changes needed here either |
+| `av1.intra-pred` | DC/V/H/PAETH/SMOOTH intra prediction (`dc-predict`/`v-predict`/`h-predict`/`paeth-predict`/`smooth-predict`, spec 7.11.2.4/7.11.2.5/7.11.2.2/7.11.2.6) -- DC's all four haveLeft/haveAbove cases implemented (though the original single-block fixtures only exercise the "neither available" case); V_PRED/H_PRED added in the mode-coverage extension below, both exercised against real multi-leaf data with a genuine avail-above/avail-left neighbor (not just the degenerate no-neighbor fallback); PAETH_PRED added in the PAETH mode-coverage extension below (the first mode here needing the topleft-corner `AboveRow[-1]`/`LeftCol[-1]` sample, via the new `above-row-corner` helper), also exercised against real multi-leaf data; SMOOTH_PRED added in the SMOOTH mode-coverage extension below (a genuine two-edge weighted blend via `Sm-Weights-Tx-*`, reusing the same `above-row-fn`/`left-col-fn` accessors PAETH_PRED uses), also exercised against real multi-leaf data with both a genuine avail-above AND avail-left neighbor. `dc-predict` is plane-agnostic (frame-w/frame-h/x/y/log2W/log2H are all caller-supplied), so the chroma extension below reuses it as-is for UV_DC_PRED -- no changes needed here either |
 | `av1.decode-block` | **decode_block()** (spec 5.11.5) for this phase's narrow validated scope: `intra_frame_mode_info()` (`read_skip`/`read_cdef`/`intra_frame_y_mode`/`intra_angle_info_y`/`uv_mode`/`filter_intra_mode_info`'s conditional guard), `read_block_tx_size()`, `residual()`/`transform_block()`/`coeffs()` (all_zero/transform_type/eob_pt_1024 or eob_pt_256/eob_extra/coeff_base/coeff_base_eob/coeff_br/dc_sign/sign_bit/golomb, with real per-context CDF persistence+adaptation, including cross-block dc_sign/txb_skip context via per-plane AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext), and reconstruction (predict_intra + dequantize + inverse_transform_2d + clip) -- for BOTH luma (plane 0, TX_32X32) and, per the chroma extension below, U/V (planes 1/2, TX_16X16, 4:2:0). See its namespace docstring for the exact scope boundary and why each boundary was chosen (frame-level `guard-frame-scope!` throws for out-of-scope streams) |
 
 **Explicitly NOT implemented (next phase)**: inter frames (`frame_type ==
@@ -73,8 +74,8 @@ is wired in as the `:decode-block-fn`), including real MULTI-leaf frames
 `av1.decode-block`'s namespace docstring specifies -- FLIPADST/IDTX/V_DCT/
 H_DCT transform types (DCT_DCT/ADST_DCT/DCT_ADST/ADST_ADST ARE supported,
 the latter three only for the ADST extension's TX_4X4/luma leaves, see
-below), any intra mode other than DC_PRED/V_PRED/H_PRED/PAETH_PRED (luma) or
-UV_DC_PRED (chroma, see below), any transform size other than TX_32X32/
+below), any intra mode other than DC_PRED/V_PRED/H_PRED/PAETH_PRED/
+SMOOTH_PRED (luma) or UV_DC_PRED (chroma, see below), any transform size other than TX_32X32/
 TX_4X4 (luma)/TX_16X16 (chroma), 4:2:2/4:4:4 chroma subsampling, and
 segmentation/delta-Q/delta-LF/screen-content-tools/intra-BC are all
 explicitly out of scope and throw `ex-info` rather than silently
@@ -458,10 +459,108 @@ already (and correctly) excludes PAETH_PRED with no code change.
   `test/av1/decode_block_test.clj`'s `paeth-pred-64x64-bit-exact-test`.
 - **Explicitly NOT covered by this extension**: chroma (Cb/Cr) + luma
   PAETH_PRED (see above); SMOOTH_PRED/SMOOTH_V_PRED/SMOOTH_H_PRED (spec
-  7.11.2.6, a different prediction process entirely); D45/D135/D113/D157/
-  D203/D67 (directional modes with nonzero angle, which -- unlike V_PRED/
-  H_PRED's pAngle-exactly-90/180 case -- would need real edge-filter/
-  upsample/angle-delta support).
+  7.11.2.6, a different prediction process entirely -- see next section for
+  SMOOTH_PRED, which IS now covered); D45/D135/D113/D157/D203/D67
+  (directional modes with nonzero angle, which -- unlike V_PRED/H_PRED's
+  pAngle-exactly-90/180 case -- would need real edge-filter/upsample/
+  angle-delta support).
+
+### SMOOTH_PRED mode-coverage extension (ADR-2607122000 Migration step 9, continued)
+
+The DC_PRED/V_PRED/H_PRED/PAETH_PRED luma mode set above has been extended
+to also support **SMOOTH_PRED** (spec 7.11.2.6 "Smooth intra prediction
+process", SMOOTH_PRED case only -- SMOOTH_V_PRED/SMOOTH_H_PRED, the two 1D
+simplifications the same spec section also defines, remain out of scope,
+fetched 2026-07-13 from AOMediaCodec/av1-spec master,
+08.decoding.process.md #Smooth intra prediction process /
+10.additional.tables.md for the `Sm_Weights_Tx_*` weight tables). Like
+PAETH_PRED, SMOOTH_PRED is **not a directional mode**
+(`is_directional_mode(SMOOTH_PRED)` is false per spec, so
+`intra_frame_mode_info()`'s mode dispatch routes it to its own dedicated
+"smooth intra prediction process" 7.11.2.6, not the directional process
+7.11.2.4 that V_PRED/H_PRED use), so this extension needed no new
+angle-delta handling either -- `av1.decode-block/read-angle-delta-y`'s
+existing `(contains? #{V_PRED H_PRED} y-mode)` gate already (and
+correctly) excludes SMOOTH_PRED with no code change.
+
+- **`av1.intra-pred/smooth-predict`** implements spec 7.11.2.6's exact
+  SMOOTH_PRED formula: for each output sample `(i,j)`,
+
+  ```c
+  smoothPred =   smWeightsY[ i ] * AboveRow[ j ] +
+              ( 256 - smWeightsY[ i ] ) * LeftCol[ h - 1 ] +
+                smWeightsX[ j ] * LeftCol[ i ] +
+              ( 256 - smWeightsX[ j ] ) * AboveRow[ w - 1 ]
+  pred[ i ][ j ] = Round2( smoothPred, 9 )
+  ```
+
+  where `smWeightsX`/`smWeightsY` are `av1.tables/Sm-Weights-Tx-*` selected
+  by `log2W`/`log2H` (2/3/4/5/6 -> 4x4/8x8/16x16/32x32/64x64, per the
+  spec's own dispatch table) -- a genuine two-edge bilinear-style blend
+  (unlike PAETH_PRED's single-sample corner pick), reusing the same
+  `above-row-fn`/`left-col-fn` accessors PAETH_PRED uses (no new
+  accessor needed: `smooth-predict` only ever reads
+  `AboveRow[0..w-1]`/`LeftCol[0..h-1]`, the same range `paeth-predict`
+  reads).
+- **`av1.tables/Sm-Weights-Tx-4x4`/`8x8`/`16x16`/`32x32`/`64x64`**
+  (all five sizes, transcribed in full even though only the 32x32 table is
+  reachable in this phase's scope) were independently cross-checked
+  against a SECOND source (`aomedia.googlesource.com/aom` main branch,
+  `aom_dsp/intrapred_common.h`'s `smooth_weights[]`/`smooth_weights_u16[]`
+  arrays) -- byte-for-byte identical to the spec's own
+  `10.additional.tables.md` transcription, with element counts and
+  monotonic-decreasing-from-255 shape spot-checked, the same discipline
+  the ADST-coefficient re-transcription check used.
+- **`av1.decode-block/read-y-mode`'s neighbor-context lookup needed no
+  further widening** -- the full 13-entry `av1.tables/Intra-Mode-Context`
+  table (already transcribed for the PAETH extension) already covers
+  SMOOTH_PRED(9): `Intra_Mode_Context[SMOOTH_PRED(=9)] == 0`, IDENTICAL to
+  `Intra_Mode_Context[DC_PRED(=0)]`/`Intra_Mode_Context[PAETH_PRED(=12)]`
+  (spot-checked against the spec's own table, not assumed), so a
+  SMOOTH_PRED neighbor contributes ctx 0 the same way DC_PRED/PAETH_PRED
+  neighbors already did -- this repo's existing restriction to only the
+  `(0,0)` ctx pair still covers every reachable case.
+- **Chroma + SMOOTH_PRED luma is explicitly out of scope**, for the same
+  reason as chroma + PAETH_PRED: `av1.tables/Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H`
+  only has the DC_PRED/V_PRED/H_PRED rows transcribed -- a color frame
+  whose luma leaf decodes to SMOOTH_PRED would need
+  `TileUVModeCflAllowedCdf[9]`, not transcribed. `av1.decode-block/
+  read-uv-mode` throws the same `ex-info`
+  (`:reason :unsupported-y-mode-for-uv-mode-ctx`) for either SMOOTH_PRED or
+  PAETH_PRED YModes -- this extension's own validation fixture is
+  monochrome too, so this guard remains documented but not exercised
+  against real data.
+- **Real-decode validation**: one new REAL aomenc-encoded 64x64 monochrome
+  fixture (`keyframe-64x64-smooth`, see test/av1/fixtures.clj's docstring),
+  the same real-MULTI-leaf construction as the vpred/hpred/paeth fixtures
+  (one 64x64 superblock forced via `--min-partition-size=32
+  --max-partition-size=32` into a real 2x2 grid of BLOCK_32X32 leaves), but
+  with `--enable-smooth-intra=1`/`--enable-directional-intra=0`/
+  `--enable-paeth-intra=0` (leaving `{DC_PRED, SMOOTH_PRED, SMOOTH_V_PRED,
+  SMOOTH_H_PRED}` as the only structurally legal luma modes). Content is
+  authored per-quadrant: top-left flat 128 (forces DC_PRED trivially);
+  top-right/bottom-left are 1D sinusoids invariant along the other axis
+  (same construction as the vpred/hpred fixtures); bottom-right is authored
+  as the EXACT spec 7.11.2.6 SMOOTH_PRED formula applied to those two 1D
+  edges using the real `Sm_Weights_Tx_32x32` table -- i.e. this block's
+  content IS what a real SMOOTH_PRED reconstruction from its real
+  neighbors would produce, giving the real encoder's RD search a genuine
+  incentive to choose SMOOTH_PRED over DC_PRED (which ignores all spatial
+  variation) or SMOOTH_V_PRED/SMOOTH_H_PRED (each of which ignores one of
+  the two edges this content varies along). Confirmed (not assumed) by
+  actually decoding and inspecting the real chosen YMode: the real encoder
+  chose DC_PRED for the first three leaves (eob 0/67/78) and SMOOTH_PRED
+  for the bottom-right leaf (eob 1 -- a near-zero residual, consistent with
+  the content matching the SMOOTH_PRED formula almost exactly), and the
+  full reconstruction is bit-exact (no tolerance) against dav1d's
+  independent decode of the same bitstream. See
+  `test/av1/decode_block_test.clj`'s `smooth-pred-64x64-bit-exact-test`.
+- **Explicitly NOT covered by this extension**: chroma (Cb/Cr) + luma
+  SMOOTH_PRED (see above); SMOOTH_V_PRED/SMOOTH_H_PRED (the two 1D
+  simplifications of 7.11.2.6, not implemented -- `av1.decode-block`
+  throws `ex-info` if the real encoder ever picks either); D45/D135/D113/
+  D157/D203/D67 (directional modes with nonzero angle, same as the PAETH
+  extension's note above).
 
 ## Validation
 
@@ -815,11 +914,63 @@ neighbor) -- i.e. this repo observed which mode a real encoder picked
 rather than assuming it -- and that the reconstructed 64x64 luma plane is
 bit-exact against dav1d's independent decode of the same bitstream.
 
-Not yet exercised against real data: chroma (Cb/Cr) + luma PAETH_PRED
-(explicitly guarded against, see the extension section above), SMOOTH*/
-D45/D135/D113/D157/D203/D67 intra modes, any transform size other than
-TX_32X32, ADST/IDTX/FLIPADST transform types (for a PAETH_PRED leaf), and
-inter prediction.
+Not yet exercised against real data (as of the PAETH_PRED extension):
+chroma (Cb/Cr) + luma PAETH_PRED (explicitly guarded against, see the
+extension section above), SMOOTH*/D45/D135/D113/D157/D203/D67 intra modes,
+any transform size other than TX_32X32, ADST/IDTX/FLIPADST transform types
+(for a PAETH_PRED leaf), and inter prediction.
+
+### SMOOTH_PRED (`av1.decode-block-test`, `keyframe-64x64-smooth`)
+
+Validates the SMOOTH_PRED mode-coverage extension (see its section above)
+against a REAL aomenc-encoded 64x64 monochrome keyframe -- again a real
+**multi-leaf** frame (one 64x64 superblock forced into a 2x2 grid of
+BLOCK_32X32 leaves):
+
+```sh
+aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \
+  --monochrome --enable-cdef=0 --enable-restoration=0 --loopfilter-control=0 \
+  --enable-filter-intra=0 --enable-smooth-intra=1 --enable-paeth-intra=0 \
+  --enable-directional-intra=0 --enable-angle-delta=0 --enable-intrabc=0 \
+  --enable-palette=0 --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \
+  --enable-rect-partitions=0 --enable-ab-partitions=0 --enable-1to4-partitions=0 \
+  --enable-tx-size-search=0 --min-partition-size=32 --max-partition-size=32 \
+  --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \
+  --obu -o keyframe-64x64-smooth.obu keyframe-64x64-smooth.y4m
+
+dav1d -i keyframe-64x64-smooth.obu -o keyframe-64x64-smooth.dav1d.yuv
+```
+
+(same aomenc/dav1d versions as the rest of this repo's fixtures, generated
+2026-07-13). `--enable-smooth-intra=1` (libaom's default) combined with
+`--enable-directional-intra=0`/`--enable-paeth-intra=0`/the pre-existing
+`--enable-palette=0`/etc. leaves `{DC_PRED, SMOOTH_PRED, SMOOTH_V_PRED,
+SMOOTH_H_PRED}` as the only structurally legal luma modes this encode
+could produce (this repo's `read-y-mode` would throw had the encoder ever
+picked SMOOTH_V_PRED/SMOOTH_H_PRED -- it didn't). Content: top-left flat
+128 (forces DC_PRED trivially); top-right/bottom-left are 1D sinusoids
+invariant along the other axis; bottom-right is authored as the EXACT spec
+7.11.2.6 SMOOTH_PRED formula applied to those two edges via the real
+`Sm_Weights_Tx_32x32` table -- i.e. this block's content IS what a real
+SMOOTH_PRED reconstruction from its real neighbors would produce, the
+classic content class that favors a genuine two-edge blend over DC_PRED's
+single average or SMOOTH_V/H_PRED's single-edge blend (see the extension
+section above for the derivation).
+
+`av1.decode-block-test` confirms (not merely infers) that the real
+encoder chose `DC_PRED` for the top-left/top-right/bottom-left leaves and
+`SMOOTH_PRED` for the bottom-right leaf (the only leaf with both a real
+avail-above and avail-left neighbor, eob=1 -- a near-zero residual
+consistent with the content matching the SMOOTH_PRED formula almost
+exactly) -- i.e. this repo observed which mode a real encoder picked
+rather than assuming it -- and that the reconstructed 64x64 luma plane is
+bit-exact against dav1d's independent decode of the same bitstream.
+
+Not yet exercised against real data (as of the SMOOTH_PRED extension):
+chroma (Cb/Cr) + luma SMOOTH_PRED (explicitly guarded against, see the
+extension section above), SMOOTH_V_PRED/SMOOTH_H_PRED/D45/D135/D113/D157/
+D203/D67 intra modes, any transform size other than TX_32X32, ADST/IDTX/
+FLIPADST transform types (for a SMOOTH_PRED leaf), and inter prediction.
 
 ## Usage
 

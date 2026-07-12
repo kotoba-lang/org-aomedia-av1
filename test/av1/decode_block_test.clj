@@ -43,7 +43,19 @@
    sections and test/av1/fixtures.clj's docstring for the additively-
    separable diagonal-ramp content design that makes a real aomenc encode
    genuinely choose PAETH_PRED (not merely DC_PRED) for two of the four
-   BLOCK_32X32 leaves."
+   BLOCK_32X32 leaves.
+
+   `keyframe-64x64-smooth` (Migration step 9 continuation, SMOOTH_PRED
+   mode-coverage extension) extends the DC/V/H/PAETH_PRED luma mode set to
+   also include SMOOTH_PRED (spec 7.11.2.6 \"Smooth intra prediction
+   process\", SMOOTH_PRED case only -- SMOOTH_V_PRED/SMOOTH_H_PRED remain
+   out of scope) -- see av1.decode-block/av1.intra-pred namespace
+   docstrings' SMOOTH sections and test/av1/fixtures.clj's docstring for
+   the exact-SMOOTH_PRED-formula content design (using the real
+   Sm_Weights_Tx_32x32 table) that makes a real aomenc encode genuinely
+   choose SMOOTH_PRED (not merely DC_PRED, and not SMOOTH_V_PRED/
+   SMOOTH_H_PRED) for the one BLOCK_32X32 leaf with both a real
+   avail-above and a real avail-left neighbor."
   (:require [clojure.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
@@ -395,6 +407,58 @@
     (testing "reconstructed luma plane is bit-exact against dav1d's
               independent decode of the same real encoded bitstream (no
               tolerance)"
+      (is (= 4096 (count luma-plane)))
+      (is (= golden luma-plane)))))
+
+(deftest smooth-pred-64x64-bit-exact-test
+  (let [bytes (fixtures/keyframe-64x64-smooth-bytes)
+        golden (golden-vec (fixtures/keyframe-64x64-smooth-golden-yuv))
+        {:keys [frame-header leaves luma-plane]} (decode-luma-plane+leaves bytes)]
+    (testing "frame geometry: 64x64, one 64x64 superblock forced to split
+              into a 2x2 grid of BLOCK_32X32 leaves (--min-partition-size=32
+              --max-partition-size=32, see test/av1/fixtures.clj docstring)"
+      (is (= 64 (:frame-width frame-header)))
+      (is (= 64 (:frame-height frame-header)))
+      (is (= 4 (count leaves)) "top-left/top-right/bottom-left/bottom-right"))
+    (testing "every leaf is BLOCK_32X32/PARTITION_NONE/TX_32X32 (this
+              namespace's per-block scope is unchanged by the SMOOTH_PRED
+              mode-coverage extension)"
+      (doseq [leaf leaves]
+        (is (= tg/BLOCK_32X32 (:b-size leaf)))
+        (is (= tg/PARTITION_NONE (:partition leaf)))
+        (is (= 3 (get-in leaf [:decode-block :tx-size])) "TX_32X32")))
+    (testing "the real encoder actually chose SMOOTH_PRED (not merely DC_PRED
+              or SMOOTH_V_PRED/SMOOTH_H_PRED, and not merely a value this
+              repo assumed) for the one leaf with both a real avail-above
+              AND a real avail-left neighbor -- see test/av1/fixtures.clj
+              docstring for the exact-SMOOTH_PRED-formula content design and
+              why it favors SMOOTH_PRED over the DC/1D-smooth alternatives"
+      (let [[tl tr bl br] leaves]
+        (is (= db/DC_PRED (get-in tl [:decode-block :y-mode]))
+            "top-left: no neighbors at all, forces DC_PRED trivially")
+        (is (= db/DC_PRED (get-in tr [:decode-block :y-mode]))
+            "top-right: real avail-left neighbor only (top-left, flat) --
+             not enough asymmetric 2D content to beat DC_PRED here")
+        (is (= db/DC_PRED (get-in bl [:decode-block :y-mode]))
+            "bottom-left: real avail-above neighbor only (top-left, flat) --
+             symmetric case to top-right")
+        (is (= db/SMOOTH_PRED (get-in br [:decode-block :y-mode]))
+            "bottom-right: real avail-above AND avail-left neighbors, with
+             content authored to be the exact SMOOTH_PRED reconstruction of
+             those neighbors -- the real encoder's RD search genuinely
+             chose SMOOTH_PRED (mode 9) here, confirmed by this repo's own
+             CDF-symbol read against the real bitstream, not assumed")
+        (is (= 1 (get-in br [:decode-block :eob]))
+            "documents the actual observed near-zero residual for this
+             leaf (only 1 nonzero coefficient) -- consistent with the
+             content being authored as the exact SMOOTH_PRED formula
+             output, not a coincidentally-small residual")))
+    (testing "reconstructed luma plane is bit-exact against dav1d's
+              independent decode of the same real encoded bitstream (no
+              tolerance) -- the primary regression test for
+              av1.intra-pred/smooth-predict's Sm_Weights_Tx_32x32-driven
+              two-edge blend, not just the CDF-symbol-read/dispatch
+              machinery in isolation"
       (is (= 4096 (count luma-plane)))
       (is (= golden luma-plane)))))
 

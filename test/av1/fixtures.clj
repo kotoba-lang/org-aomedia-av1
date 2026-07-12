@@ -628,3 +628,90 @@
    docstring."
   []
   (load-resource "av1/fixtures/keyframe-64x64-paeth.dav1d.yuv"))
+
+(defn keyframe-64x64-smooth-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 64x64 MONOCHROME keyframe -- the
+   SMOOTH_PRED mode-coverage extension fixture (ADR-2607122000 Migration
+   step 9 continuation -- adds SMOOTH_PRED to av1.decode-block's
+   DC_PRED/V_PRED/H_PRED/PAETH_PRED luma scope, see av1.decode-block/
+   av1.intra-pred namespace docstrings' SMOOTH sections). Same real-MULTI-
+   leaf construction as `keyframe-64x64-vpred-bytes`/`keyframe-64x64-paeth-
+   bytes` (one 64x64 superblock forced via `--min-partition-size=32
+   --max-partition-size=32` into a real 2x2 grid of BLOCK_32X32 leaves),
+   but with `--enable-smooth-intra=1` (left at its libaom default) instead
+   of `0`, and every directional/Paeth/filter-intra/palette/CfL/intrabc/
+   angle-delta mode disabled -- combined with the pre-existing
+   `--enable-directional-intra=0`/`--enable-paeth-intra=0`/etc, `{DC_PRED,
+   SMOOTH_PRED, SMOOTH_V_PRED, SMOOTH_H_PRED}` are structurally the only
+   luma modes left for the encoder to choose (this repo's `read-y-mode`
+   throws if the real encoder ever picked SMOOTH_V_PRED/SMOOTH_H_PRED
+   instead -- it didn't, see below).
+
+   Content is authored (not a lavfi filter) per-quadrant specifically to
+   give SMOOTH_PRED -- not merely DC_PRED or the two 1D SMOOTH_V/H
+   simplifications -- a genuine, strong RD incentive for the
+   bottom-right leaf (the only leaf with BOTH a real avail-above AND a
+   real avail-left neighbor):
+
+     - top-left (0..31,0..31): FLAT constant 128 (no neighbors at all --
+       forces DC_PRED trivially, same tie-breaking role as the vpred/
+       hpred/paeth fixtures' top-left).
+     - top-right (32..63,0..31): arX(lx) = 128 + 40*sin(2*pi*lx/32),
+       invariant along y (lx = local x in the block, 0..31) -- exactly the
+       same construction `keyframe-64x64-vpred-bytes` uses for its
+       top-right, so this block's bottom row (which becomes the
+       bottom-right leaf's real AboveRow[j]) is a genuine encoded sample
+       of arX(j), not an idealized value.
+     - bottom-left (0..31,32..63): lcY(ly) = 128 + 40*sin(2*pi*ly/32),
+       invariant along x (ly = local y in the block, 0..31) -- mirrors
+       `keyframe-64x64-hpred-bytes`'s bottom-left construction, so this
+       block's right column (the bottom-right leaf's real LeftCol[i]) is a
+       genuine encoded sample of lcY(i).
+     - bottom-right (32..63,32..63): authored as the EXACT spec 7.11.2.6
+       SMOOTH_PRED formula applied to arX/lcY as if they were already the
+       real AboveRow/LeftCol (using the real `Sm_Weights_Tx_32x32` table --
+       see av1.tables namespace docstring's Sm-Weights section -- not an
+       approximation): for i,j = 0..31,
+         pred(i,j) = Round2(smWeightsY[i]*arX(j) + (256-smWeightsY[i])*lcY(31)
+                           + smWeightsX[j]*lcY(i) + (256-smWeightsX[j])*arX(31), 9)
+       i.e. this block's content IS what a real SMOOTH_PRED reconstruction
+       from its real neighbors would produce -- giving a real encoder's RD
+       search a genuine, principled incentive to choose SMOOTH_PRED over
+       DC_PRED (which ignores all spatial variation) or SMOOTH_V_PRED/
+       SMOOTH_H_PRED (each of which ignores one of the two edges this
+       content genuinely varies along), not a fabricated or hand-picked
+       coincidence.
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=1 \\
+       --enable-paeth-intra=0 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --min-partition-size=32 --max-partition-size=32 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-64x64-smooth.obu keyframe-64x64-smooth.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-64x64-smooth.obu -o
+   keyframe-64x64-smooth.dav1d.yuv` (dav1d 1.5.3, a completely independent
+   AV1 decoder) produced the raw 8-bit gray 64x64 luma plane checked in as
+   `keyframe-64x64-smooth.dav1d.yuv`. Empirically confirmed (see
+   test/av1/decode_block_test.clj) -- NOT assumed by construction: all 4
+   leaves are BLOCK_32X32/PARTITION_NONE/TX_32X32; top-left/top-right/
+   bottom-left decode to y-mode DC_PRED (0, eob 0/67/78); bottom-right
+   decodes to y-mode SMOOTH_PRED (9, eob 1) -- i.e. the real encoder
+   genuinely chose SMOOTH_PRED for the one leaf this fixture's content
+   targets, with only a single nonzero residual coefficient (not merely a
+   value this repo assumed), and this repo's reconstruction of that leaf
+   is bit-exact against dav1d's independent decode."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-smooth.obu"))
+
+(defn keyframe-64x64-smooth-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-64x64-smooth-bytes` -- see its
+   docstring."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-smooth.dav1d.yuv"))

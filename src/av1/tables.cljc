@@ -72,13 +72,46 @@
 ;; transcribed in full (all 13 entries, not just the DC/V/H-reachable
 ;; prefix -- see av1.decode-block/read-y-mode's ctx-of, which looks up a
 ;; neighbor's ALREADY-DECODED YMode here). Intra_Mode_Context[DC_PRED(=0)]
-;; == Intra_Mode_Context[PAETH_PRED(=12)] == 0, which is why every
-;; intra_frame_y_mode ctx in this repo's {DC_PRED,V_PRED,H_PRED,PAETH_PRED}
-;; scope is always (0,0) as long as no neighbor ever decoded to V_PRED/
-;; H_PRED (ctx 1/2) -- see av1.decode-block namespace docstring's PAETH
-;; section for why PAETH_PRED specifically doesn't introduce any new
-;; reachable ctx pair.
+;; == Intra_Mode_Context[SMOOTH_PRED(=9)] == Intra_Mode_Context[PAETH_PRED(=12)]
+;; == 0, which is why every intra_frame_y_mode ctx in this repo's
+;; {DC_PRED,V_PRED,H_PRED,SMOOTH_PRED,PAETH_PRED} scope is always (0,0) as
+;; long as no neighbor ever decoded to V_PRED/H_PRED (ctx 1/2) -- see
+;; av1.decode-block namespace docstring's PAETH/SMOOTH sections for why
+;; neither mode introduces any new reachable ctx pair.
 (def Intra-Mode-Context [0 1 2 3 4 4 4 4 3 0 1 2 0])
+
+;; 08.decoding.process.md #Smooth intra prediction process /
+;; 10.additional.tables.md: Sm_Weights_Tx_4x4/8x8/16x16/32x32/64x64 --
+;; smWeightsX/smWeightsY are selected by log2W/log2H (2/3/4/5/6 ->
+;; 4x4/8x8/16x16/32x32/64x64) per the spec's dispatch table (see
+;; av1.intra-pred/smooth-predict). All five sizes are transcribed in full
+;; (even though this phase's only supported luma block size is
+;; 32x32/log2W=log2H=5) the same way Max-Tx-Size-Rect above is
+;; transcribed in full despite only TX_32X32 being reachable --
+;; smooth-predict is written generically over log2W/log2H the same way
+;; dc-predict/v-predict/h-predict/paeth-predict are, so the unreachable
+;; sizes cost nothing extra to include. Independently cross-checked
+;; against a SECOND source (aomedia.googlesource.com/aom main branch,
+;; aom_dsp/intrapred_common.h's smooth_weights[]/smooth_weights_u16[]
+;; arrays) -- byte-for-byte identical to the spec's own transcription
+;; below (both fetched 2026-07-13); every array's element count was also
+;; checked against its own declared dimension (4/8/16/32/64) and its
+;; monotonic-non-increasing-from-255 shape (weights decay from ~1x down
+;; to ~1/block_size, per the spec's own "quadratic from '1' to '1 /
+;; block_size'" comment in intrapred_common.h) before being accepted, the
+;; same discipline used for every large table in this namespace.
+(def Sm-Weights-Tx-4x4 [255 149 85 64])
+(def Sm-Weights-Tx-8x8 [255 197 146 105 73 50 37 32])
+(def Sm-Weights-Tx-16x16
+  [255 225 196 170 145 123 102 84 68 54 43 33 26 20 17 16])
+(def Sm-Weights-Tx-32x32
+  [255 240 225 210 196 182 169 157 145 133 122 111 101 92 83 74
+   66 59 52 45 39 34 29 25 21 17 14 12 10 9 8 8])
+(def Sm-Weights-Tx-64x64
+  [255 248 240 233 225 218 210 203 196 189 182 176 169 163 156 150
+   144 138 133 127 121 116 111 106 101 96 91 86 82 77 73 69
+   65 61 57 54 50 47 44 41 38 35 32 29 27 25 22 20 18 16 15
+   13 12 10 9 8 7 6 6 5 5 4 4 4])
 
 ;; 08.decoding.process.md #Butterfly functions: Cos128_Lookup[65].
 (def Cos128-Lookup
@@ -158,14 +191,16 @@
 ;; TileIntraFrameYModeCdf[abovemode][leftmode] entry transcribed (out of
 ;; the full 5x5 abovemode/leftmode space -- see av1.decode-block namespace
 ;; docstring). The row's 13 cdf symbols cover every INTRA_MODES value
-;; (0..12, including PAETH_PRED=12), not just DC/V/H -- only the *row
-;; selection* (which (abovemode,leftmode) ctx pair) was ever restricted, not
-;; this row's own symbol coverage; the PAETH-coverage extension (see
-;; av1.decode-block namespace docstring's PAETH section) only needed to
-;; widen ctx-of's neighbor-mode lookup (Intra-Mode-Context, above -- already
-;; transcribed in full and already maps PAETH_PRED(12)->0, same as
-;; DC_PRED(0)->0) to allow PAETH_PRED as a decodable/re-consultable neighbor
-;; mode, not any change to this cdf row itself.
+;; (0..12, including SMOOTH_PRED=9 and PAETH_PRED=12), not just DC/V/H --
+;; only the *row selection* (which (abovemode,leftmode) ctx pair) was ever
+;; restricted, not this row's own symbol coverage; neither the PAETH-
+;; coverage extension nor the SMOOTH-coverage extension (see
+;; av1.decode-block namespace docstring's PAETH/SMOOTH sections) needed
+;; any change to this cdf row itself -- both only needed to widen
+;; ctx-of's neighbor-mode lookup (Intra-Mode-Context, above -- already
+;; transcribed in full and already maps both SMOOTH_PRED(9)->0 and
+;; PAETH_PRED(12)->0, same as DC_PRED(0)->0) to allow that mode as a
+;; decodable/re-consultable neighbor mode.
 (def Default-Intra-Frame-Y-Mode-Cdf-0-0
   [15588 17027 19338 20218 20682 21110 21825 23244 24189 28165 29093 30466 32768 0])
 
