@@ -49,6 +49,19 @@
         bit (bit-and 1 (bit-shift-right byte-val shift))]
     [bit (update reader :pos inc)]))
 
+(defn skip-bits
+  "Advance the reader by `n` bits without reading/accumulating a value.
+   Equivalent to calling `f` and discarding the result, but safe for large
+   `n` (thousands of bits) -- `f` builds its return value via repeated
+   `2*x + bit`, so for large `n` that accumulator itself overflows a 64-bit
+   long well before all the bits are consumed (Clojure's `*`/`+` are
+   overflow-checked by default). Needed by av1.bool-decoder/exit-symbol,
+   which must skip up to `8*sz - 15` leftover bits at the end of a tile
+   (hundreds to thousands of bits for a real-sized tile) but never needs the
+   skipped bits' value."
+  [reader n]
+  (update reader :pos + n))
+
 (defn f
   "spec 4 descriptor f(n) / 8.1 parsing process:
    x = 0; for i in 0..n-1: x = 2*x + read_bit(). n=0 reads nothing, returns 0."

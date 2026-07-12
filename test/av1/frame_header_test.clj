@@ -49,3 +49,71 @@
               MAX_TILE_WIDTH/MAX_TILE_AREA"
       (is (= 1 (get-in frame-hdr [:tile-info :tile-cols])))
       (is (= 1 (get-in frame-hdr [:tile-info :tile-rows]))))))
+
+;; Validates the uncompressed_header() continuation past quantization_params()
+;; -- segmentation_params()/delta_q_params()/delta_lf_params()/
+;; loop_filter_params()/cdef_params()/lr_params()/read_tx_mode()/
+;; frame_reference_mode()/skip_mode_params()/global_motion_params()/
+;; film_grain_params() -- against keyframe-256x192.obu (a real, content-varied
+;; SVT-AV1 encode, av1.fixtures/keyframe-256x192-bytes).
+;;
+;; base_q_idx is cross-checked against a COMPLETELY INDEPENDENT decoder:
+;; `aomdec --framestats=out.csv keyframe-256x192.obu` (the official AOM
+;; reference decoder, libaom 3.14.1) reports `qp,116` for this frame --
+;; exactly matching this namespace's decoded :base-q-idx. Since base_q_idx
+;; sits right at the start of quantization_params(), landing on the correct
+;; value here is itself strong evidence that show_existing_frame through
+;; tile_info() (everything av1.frame-header/parse walks *before*
+;; quantization_params()) also held bit-exact -- any earlier misalignment
+;; would have shifted this value to something else entirely, not by
+;; coincidence landed on 116.
+(deftest frame-header-segmentation-through-film-grain-real-stream-test
+  (let [bytes (fixtures/keyframe-256x192-bytes)
+        seq-obu (find-obu bytes :obu-sequence-header)
+        seq-hdr (sh/parse (:reader-at-payload seq-obu))
+        frame-obu (or (find-obu bytes :obu-frame)
+                      (find-obu bytes :obu-frame-header))
+        frame-hdr (fh/parse (:reader-at-payload frame-obu) seq-hdr)]
+    (testing "base_q_idx matches the independent aomdec (libaom reference
+              decoder) qp readout for this exact stream"
+      (is (= 116 (:base-q-idx frame-hdr))))
+    (testing "segmentation disabled (SVT-AV1 default, no explicit segmentation
+              request) -> all-zero FeatureEnabled/FeatureData tables"
+      (is (= 0 (get-in frame-hdr [:segmentation-params :segmentation-enabled])))
+      (is (every? #(every? zero? %) (get-in frame-hdr [:segmentation-params :feature-enabled])))
+      (is (every? #(every? zero? %) (get-in frame-hdr [:segmentation-params :feature-data]))))
+    (testing "delta_q_params: base_q_idx > 0 so delta_q_present is actually
+              read (not defaulted) -- both 0/1 are spec-legal, just checking
+              the field was populated, not left at a stale nil"
+      (is (contains? #{0 1} (get-in frame-hdr [:delta-q-params :delta-q-present]))))
+    (testing "CodedLossless/AllLossless are boolean-coded 0/1 and consistent
+              with a real qp=116 encode (lossless would require qindex==0)"
+      (is (= 0 (:coded-lossless frame-hdr)))
+      (is (= 0 (:all-lossless frame-hdr))))
+    (testing "loop_filter_params: levels are valid 6-bit values (0..63) and
+              enable-cdef/enable-restoration were on in the sequence header
+              (seq-hdr) so cdef_params()/lr_params() actually read fields
+              rather than short-circuiting to the all-zero disabled default"
+      (is (every? #(<= 0 % 63) (get-in frame-hdr [:loop-filter-params :loop-filter-level])))
+      (is (= 1 (:enable-cdef seq-hdr)))
+      (is (= 1 (:enable-restoration seq-hdr))))
+    (testing "cdef_params: CdefDamping = cdef_damping_minus_3 + 3 is in
+              spec's valid [3,6] range; cdef-bits selects 2^cdef-bits
+              strength-pair entries"
+      (is (<= 3 (:cdef-damping (:cdef-params frame-hdr)) 6))
+      (is (= (bit-shift-left 1 (:cdef-bits (:cdef-params frame-hdr)))
+             (count (:cdef-y-pri-strength (:cdef-params frame-hdr))))))
+    (testing "read_tx_mode(): CodedLossless is 0 here so TxMode is
+              tx-mode-select or tx-mode-largest (never :only-4x4, which is
+              reserved for CodedLossless==1)"
+      (is (contains? #{:tx-mode-select :tx-mode-largest} (:tx-mode frame-hdr))))
+    (testing "frame_reference_mode()/skip_mode_params()/global_motion_params():
+              all zero-bit passthroughs for FrameIsIntra==1"
+      (is (= 0 (:reference-select frame-hdr)))
+      (is (= 0 (:skip-mode-present frame-hdr)))
+      (is (every? #(= :identity %) (:gm-type frame-hdr))))
+    (testing "film_grain_params(): film_grain_params_present is 0 in this
+              sequence header, so film_grain_params() short-circuits to
+              apply_grain=0 with no bits read"
+      (is (= 0 (:film-grain-params-present seq-hdr)))
+      (is (= 0 (:apply-grain (:film-grain-params frame-hdr)))))))
