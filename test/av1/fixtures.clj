@@ -304,6 +304,96 @@
   []
   (load-resource "av1/fixtures/keyframe-32x32-color-busy.dav1d.yuv"))
 
+(defn keyframe-64x64-color-multileaf-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 64x64 4:2:0 COLOR keyframe (Cb/Cr
+   both real, non-flat data -- NOT `--monochrome`), the multi-leaf-chroma
+   extension fixture (ADR-2607122000 Migration step 9 continuation -- adds
+   real MULTI-leaf support to av1.decode-block's originally single-whole-
+   frame-leaf-only chroma scope). Unlike `keyframe-32x32-color-bytes` (one
+   BLOCK_32X32 leaf covering the entire 32x32 frame), this is a real
+   64x64 frame, one 64x64 superblock forced via
+   `--min-partition-size=32 --max-partition-size=32` (same technique as
+   `keyframe-64x64-vpred-bytes`) to split into exactly 4 BLOCK_32X32 luma
+   leaves in a 2x2 grid -- each leaf gets its OWN independent BLOCK_16X16
+   chroma (Cb/Cr) block (the simple 1:1 luma-leaf/chroma-block
+   correspondence this extension supports, see av1.decode-block namespace
+   docstring's multi-leaf-chroma section), genuinely exercising cross-leaf
+   AboveLevelContext/AboveDcContext/AboveDcContext/LeftLevelContext/
+   LeftDcContext for the chroma planes for the first time (previously only
+   ever queried by a leaf that couldn't exist, per the pre-extension single-
+   leaf-only scope).
+
+   Same aomenc scope restrictions as `keyframe-32x32-color-bytes` (see its
+   docstring, including `--enable-cfl-intra=0` etc. -- DC_PRED/UV_DC_PRED
+   are structurally the only modes left for the encoder to choose) PLUS
+   `--min-partition-size=32 --max-partition-size=32` to force the 2x2
+   BLOCK_32X32 split deterministically. Content is authored directly as
+   known raw 8-bit I420 pixel bytes (not a lavfi filter): each of the 4
+   quadrants (per luma leaf / per chroma block) uses a DIFFERENT
+   frequency+amplitude sinusoidal combination per plane (not merely a phase
+   shift of the same wave), so the 4 leaves have genuinely different
+   coefficient complexity, not just different pixel values that happen to
+   produce the same nonzero-coefficient count (an earlier fixture revision
+   used same-frequency phase-shifted sinusoids and empirically DID produce
+   identical eob across all 4 leaves for every plane -- a real coincidence
+   of that specific content design, not a bug, but a weaker regression
+   fixture; this revision's per-quadrant frequency variation avoids that
+   ambiguity and gives each leaf/plane a distinct observed eob, see below).
+   Per plane, per quadrant (qx,qy in {0,1}, local coords lx/ly within that
+   quadrant, freq/amp varying by quadrant):
+
+     Y(x,y)  = 128 + amp*sin(2*pi*freq*lx/32 + 0.3) + (amp/2)*cos(2*pi*freq*ly/32 + 1.1)
+     Cb(x,y) = 100 + amp*sin(2*pi*freq*lx/16 + 0.8) + (amp/2)*cos(2*pi*freq*ly/16)
+     Cr(x,y) = 160 + amp*cos(2*pi*freq*ly/16 + 0.4) + (amp/2)*sin(2*pi*freq*lx/16 + 1.6)
+
+   (each clamped to [0,255] and rounded to the nearest integer; Y over the
+   full 64x64 luma plane in four 32x32 quadrants, Cb/Cr over the 32x32
+   chroma planes in four 16x16 quadrants -- authored as a small Python
+   script producing a raw y4m frame, not checked into this repo, since only
+   the resulting bitstream + golden decode need to be reproducible).
+   Empirically confirmed (see test/av1/decode_block_test.clj): the 4
+   leaves' `:eob`/`:u-eob`/`:v-eob` are 16/7/6 (top-left), 154/92/78
+   (top-right), 67/29/16 (bottom-left), 277/121/136 (bottom-right) -- all
+   4 genuinely different per plane, confirming 4 independently decoded
+   chroma blocks (not one leaf's result reused across all 4).
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --enable-cdef=0 --enable-restoration=0 --loopfilter-control=0 \\
+       --enable-filter-intra=0 --enable-smooth-intra=0 --enable-paeth-intra=0 \\
+       --enable-directional-intra=0 --enable-angle-delta=0 --enable-intrabc=0 \\
+       --enable-palette=0 --enable-cfl-intra=0 --enable-qm=0 --enable-tx64=0 \\
+       --enable-rect-tx=0 --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --min-partition-size=32 --max-partition-size=32 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-64x64-color-multileaf.obu keyframe-64x64-color-multileaf.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-64x64-color-multileaf.obu -o
+   keyframe-64x64-color-multileaf.dav1d.yuv` (dav1d 1.5.3, a completely
+   independent AV1 decoder) produced the raw 8-bit I420 planes (4096 Y +
+   1024 U + 1024 V bytes) checked in as
+   `keyframe-64x64-color-multileaf.dav1d.yuv` -- see
+   `keyframe-64x64-color-multileaf-golden-yuv` below and
+   test/av1/decode_block_test.clj for the bit-exact comparison against this
+   repo's decoder (all three planes, all 4 leaves). `ffmpeg -loglevel debug`
+   independently confirms `Frame 0: size 64x64 ... subsample 2x2 ... tiles
+   1x1` (4:2:0, matching this repo's own decoded frame-header fields).
+   test/av1/decode_block_test.clj additionally confirms (not merely infers)
+   that all 4 leaves are genuinely BLOCK_32X32/PARTITION_NONE, and
+   DC_PRED/UV_DC_PRED throughout (the only modes these encoder flags leave
+   structurally possible)."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-color-multileaf.obu"))
+
+(defn keyframe-64x64-color-multileaf-golden-yuv
+  "dav1d's raw 8-bit I420 decode of `keyframe-64x64-color-multileaf-bytes`
+   (6144 bytes: 4096 Y + 1024 U + 1024 V, row-major each plane) -- the
+   independent ground truth test/av1/decode_block_test.clj compares this
+   repo's decoder output against, split per-plane."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-color-multileaf.dav1d.yuv"))
+
 (defn keyframe-64x64-split16-bytes
   "A REAL aomenc (libaom 3.14.1)-encoded 64x64 MONOCHROME keyframe,
    deliberately forced two levels deep into decode_partition()'s recursion

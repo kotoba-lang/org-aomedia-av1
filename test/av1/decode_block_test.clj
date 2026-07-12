@@ -214,15 +214,24 @@
       (is (= golden-u u-plane))
       (is (= golden-v v-plane)))))
 
-(deftest multi-leaf-color-throws-test
-  (testing "chroma decode is only validated for a single whole-frame leaf
-            (see av1.decode-block namespace docstring's cross-block-context
-            section) -- decoding a real MULTI-leaf color bitstream throws
-            ex-info at the second leaf rather than silently mis-decoding
-            (uses keyframe-32x32-color's frame-header/seq-header shape but
-            simulates a second leaf by calling decode-block-fn directly
-            with avail-u?/avail-l? both true, the same signal a real
-            multi-leaf tile would pass)"
+;; NOTE: the old single-whole-frame-leaf-only guard (:unsupported-multi-leaf-chroma,
+;; thrown whenever avail-u?/avail-l? was true for ANY color-frame leaf) is
+;; gone -- multi-leaf color decode for the simple 1:1 BLOCK_32X32-leaf/
+;; BLOCK_16X16-chroma-block correspondence is now genuinely exercised end to
+;; end against a REAL multi-leaf aomenc-encoded bitstream, bit-exactly
+;; against dav1d, rather than only asserted via a synthetic direct call --
+;; see `multi-leaf-color-64x64-bit-exact-test` below.
+
+(deftest shared-chroma-block-throws-test
+  (testing "the AV1 spec's 'shared chroma block' case (a luma leaf mi-size
+            other than BLOCK_32X32, where multiple small luma leaves would
+            share one chroma block) is explicitly out of scope for color
+            frames and throws :unsupported-shared-chroma-block -- simulated
+            directly (uses keyframe-32x32-color's frame-header/seq-header
+            shape) since this repo's own luma leaf-size support is
+            structurally restricted to BLOCK_32X32 elsewhere (tx-size-for),
+            so a real bitstream reaching this exact guard doesn't otherwise
+            exist yet"
     (let [bytes (fixtures/keyframe-32x32-color-bytes)
           seq-obu (find-obu bytes :obu-sequence-header)
           seq-hdr (sh/parse (:reader-at-payload seq-obu))
@@ -233,10 +242,11 @@
           tile (first (:tiles (:tile-group result)))
           tile-state (:final-tile-state tile)]
       (try
-        (decode-block-fn (assoc tile-state :bd nil) 0 0 tg/BLOCK_32X32 true true)
+        (decode-block-fn (assoc tile-state :bd nil) 0 0 tg/BLOCK_16X16 false false)
         (is false "expected ex-info to be thrown, but decode-block-fn completed without throwing")
         (catch clojure.lang.ExceptionInfo e
-          (is (= :unsupported-multi-leaf-chroma (:reason (ex-data e)))))))))
+          (is (= :unsupported-shared-chroma-block (:reason (ex-data e))))
+          (is (= tg/BLOCK_16X16 (:mi-size (ex-data e)))))))))
 
 (defn- find-leaves
   "Collects every `:leaf` node from a tile's superblock-partitions tree, in
@@ -335,6 +345,101 @@
               independent decode (no tolerance)"
       (is (= 4096 (count luma-plane)))
       (is (= golden luma-plane)))))
+
+(defn- decode-all-planes+leaves
+  "Like `decode-luma-plane+leaves` but also returns the U/V plane buffers
+   (for `keyframe-64x64-color-multileaf-bytes`, the multi-leaf-chroma
+   regression fixture, which is both multi-leaf AND 4:2:0 color)."
+  [bytes]
+  (let [seq-obu (find-obu bytes :obu-sequence-header)
+        seq-hdr (sh/parse (:reader-at-payload seq-obu))
+        frame-obu (find-obu bytes :obu-frame)
+        frame-hdr0 (fh/parse (:reader-at-payload frame-obu) seq-hdr)
+        decode-block-fn (db/make-decode-block-fn frame-hdr0 seq-hdr)
+        result (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn})
+        tile (first (:tiles (:tile-group result)))]
+    {:frame-header (:frame-header result)
+     :leaves (find-leaves tile)
+     :luma-plane (:luma-plane (:final-tile-state tile))
+     :u-plane (:u-plane (:final-tile-state tile))
+     :v-plane (:v-plane (:final-tile-state tile))}))
+
+(deftest multi-leaf-color-64x64-bit-exact-test
+  (let [bytes (fixtures/keyframe-64x64-color-multileaf-bytes)
+        golden (golden-vec (fixtures/keyframe-64x64-color-multileaf-golden-yuv))
+        golden-y (subvec golden 0 4096)
+        golden-u (subvec golden 4096 5120)
+        golden-v (subvec golden 5120 6144)
+        {:keys [frame-header leaves luma-plane u-plane v-plane]}
+        (decode-all-planes+leaves bytes)]
+    (testing "frame geometry: 64x64, one 64x64 superblock forced (via
+              --min-partition-size=32 --max-partition-size=32, see
+              test/av1/fixtures.clj docstring) into a real 2x2 grid of
+              BLOCK_32X32 leaves, 4:2:0 color (num_planes=3)"
+      (is (= 64 (:frame-width frame-header)))
+      (is (= 64 (:frame-height frame-header)))
+      (is (= 3 (:num-planes frame-header)))
+      (is (= 4 (count leaves)) "top-left/top-right/bottom-left/bottom-right"))
+    (testing "every leaf is genuinely BLOCK_32X32/PARTITION_NONE/TX_32X32(luma)/
+              TX_16X16(chroma)/DC_PRED/UV_DC_PRED (the encoder's disabled-
+              everything-but-DC/UV_DC/NONE/TX_32X32 flags, see
+              test/av1/fixtures.clj docstring, leave no other mode
+              structurally possible) -- and each leaf's Cb/Cr block has
+              real, nonzero coefficients (not an all-zero/skip block)"
+      (doseq [leaf leaves]
+        (is (= tg/BLOCK_32X32 (:b-size leaf)))
+        (is (= tg/PARTITION_NONE (:partition leaf)))
+        (is (= 3 (get-in leaf [:decode-block :tx-size])) "TX_32X32 (luma)")
+        (is (= db/DC_PRED (get-in leaf [:decode-block :y-mode])))
+        (is (= db/UV_DC_PRED (get-in leaf [:decode-block :uv-mode])))
+        (is (pos? (get-in leaf [:decode-block :u-eob])) "Cb: real nonzero coefficients")
+        (is (pos? (get-in leaf [:decode-block :v-eob])) "Cr: real nonzero coefficients"))
+      (let [u-eobs (mapv #(get-in % [:decode-block :u-eob]) leaves)
+            v-eobs (mapv #(get-in % [:decode-block :v-eob]) leaves)
+            luma-eobs (mapv #(get-in % [:decode-block :eob]) leaves)]
+        (is (apply distinct? luma-eobs)
+            "the 4 leaves' luma eobs are pairwise distinct (per-quadrant
+             frequency-varying content, see test/av1/fixtures.clj docstring
+             -- an earlier same-frequency content design coincidentally
+             produced identical eob across all 4 leaves despite genuinely
+             different pixel content, so this fixture was redesigned to
+             avoid that ambiguity)")
+        (is (apply distinct? u-eobs) "the 4 leaves' Cb eobs are pairwise distinct")
+        (is (apply distinct? v-eobs) "the 4 leaves' Cr eobs are pairwise distinct")))
+    (testing "each leaf actually decoded an INDEPENDENT chroma block, not
+              one block's reconstruction reused/broadcast across all 4
+              leaves -- pulls each leaf's own 16x16 chroma quadrant out of
+              the shared 32x32 u-plane/v-plane buffer (via that leaf's own
+              :r/:c, subsampled) and confirms the 4 quadrants are pairwise
+              DIFFERENT reconstructed pixel content (the fixture's Cb/Cr
+              content is a continuous, non-repeating function of position,
+              see test/av1/fixtures.clj docstring, so 4 independently
+              decoded quadrants must differ)"
+      (let [quadrant (fn [plane leaf]
+                        (let [pcol (bit-shift-right (:c leaf) 1)
+                              prow (bit-shift-right (:r leaf) 1)
+                              cx (* 4 pcol) cy (* 4 prow)]
+                          (vec (for [i (range 16) j (range 16)]
+                                 (nth plane (+ (* (+ cy i) 32) cx j))))))
+            u-quads (mapv #(quadrant u-plane %) leaves)
+            v-quads (mapv #(quadrant v-plane %) leaves)]
+        (is (apply distinct? u-quads) "4 independently reconstructed Cb quadrants, pairwise distinct")
+        (is (apply distinct? v-quads) "4 independently reconstructed Cr quadrants, pairwise distinct")))
+    (testing "reconstructed luma AND chroma (Cb/Cr) planes are bit-exact
+              against dav1d's independent decode of the same real encoded
+              bitstream (no tolerance) -- the primary multi-leaf-chroma
+              regression test: this exercises real cross-leaf
+              AboveLevelContext/AboveDcContext/LeftLevelContext/
+              LeftDcContext threading for the chroma planes for the first
+              time (previously only reachable by a leaf that couldn't
+              exist under the pre-extension single-whole-frame-leaf-only
+              scope)"
+      (is (= 4096 (count luma-plane)))
+      (is (= 1024 (count u-plane)))
+      (is (= 1024 (count v-plane)))
+      (is (= golden-y luma-plane) "luma plane bit-exact")
+      (is (= golden-u u-plane) "Cb plane bit-exact")
+      (is (= golden-v v-plane) "Cr plane bit-exact"))))
 
 (deftest split16-throws-on-block16x16-test
   (testing "av1.tile-group/decode-partition's real recursion genuinely
