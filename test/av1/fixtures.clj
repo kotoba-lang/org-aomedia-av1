@@ -560,3 +560,71 @@
    against."
   []
   (load-resource "av1/fixtures/keyframe-8x8-adst-quad.dav1d.yuv"))
+
+(defn keyframe-64x64-paeth-bytes
+  "A REAL aomenc (libaom 3.14.1)-encoded 64x64 MONOCHROME keyframe -- the
+   PAETH_PRED mode-coverage extension fixture (ADR-2607122000 Migration
+   step 9 continuation -- adds PAETH_PRED to av1.decode-block's
+   DC_PRED/V_PRED/H_PRED luma scope, see av1.decode-block/av1.intra-pred
+   namespace docstrings' PAETH sections). Same real-MULTI-leaf construction
+   as `keyframe-64x64-vpred-bytes` (one 64x64 superblock forced via
+   `--min-partition-size=32 --max-partition-size=32` into a real 2x2 grid
+   of BLOCK_32X32 leaves), but with `--enable-paeth-intra=1` (left at its
+   libaom default) instead of `0`, and `--enable-directional-intra=0` (no
+   `--enable-diagonal-intra` override needed -- unlike the vpred/hpred
+   fixtures, V_PRED/H_PRED are NOT needed for this fixture, so directional
+   modes are disabled outright) -- combined with the pre-existing
+   `--enable-smooth-intra=0`/`--enable-palette=0`/etc., `{DC_PRED,
+   PAETH_PRED}` are structurally the only luma modes left for the encoder
+   to choose, not merely the likely outcome for this content.
+
+   Content is a single continuous diagonal linear ramp across the WHOLE
+   64x64 frame (authored directly as known raw pixel bytes, not a lavfi
+   filter): `pixel(x,y) = clamp(128 + 1.5*(x-32) - 1.5*(y-32))`, i.e.
+   f(x,y) = g(x) + h(y) for g(x)=128+1.5*(x-32), h(y)=-1.5*(y-32) --
+   additively separable, which makes its discrete Laplacian
+   (f(x,y)-f(x-1,y)-f(x,y-1)+f(x-1,y-1)) exactly zero almost everywhere.
+   PAETH_PRED's `base = AboveRow[j]+LeftCol[i]-AboveRow[-1]` formula (spec
+   7.11.2.2) is exactly this Laplacian test -- for content where it's zero,
+   Paeth reconstructs the ramp with zero (or near-zero, after 8-bit
+   rounding) residual, while DC_PRED's single blended average needs a much
+   larger residual to correct a whole block back to a ramp. This is the
+   textbook reason a diagonal/planar gradient favors Paeth (the same
+   rationale PNG's own Paeth filter exists for), not a hand-picked
+   coincidence.
+
+     aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
+       --monochrome --enable-cdef=0 --enable-restoration=0 \\
+       --loopfilter-control=0 --enable-filter-intra=0 --enable-smooth-intra=0 \\
+       --enable-paeth-intra=1 --enable-directional-intra=0 \\
+       --enable-angle-delta=0 --enable-intrabc=0 --enable-palette=0 \\
+       --enable-qm=0 --enable-tx64=0 --enable-rect-tx=0 \\
+       --enable-rect-partitions=0 --enable-ab-partitions=0 \\
+       --enable-1to4-partitions=0 --enable-tx-size-search=0 \\
+       --min-partition-size=32 --max-partition-size=32 \\
+       --tile-columns=0 --tile-rows=0 --kf-min-dist=1 --kf-max-dist=1 \\
+       --obu -o keyframe-64x64-paeth.obu keyframe-64x64-paeth.y4m
+
+   (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Real-decode
+   cross-check: `dav1d -i keyframe-64x64-paeth.obu -o
+   keyframe-64x64-paeth.dav1d.yuv` (dav1d 1.5.3, a completely independent
+   AV1 decoder) produced the raw 8-bit gray 64x64 luma plane checked in as
+   `keyframe-64x64-paeth.dav1d.yuv`. Empirically confirmed (see
+   test/av1/decode_block_test.clj) -- NOT assumed by construction: all 4
+   leaves are BLOCK_32X32/PARTITION_NONE/TX_32X32; top-left (r=0,c=0, eob
+   21) and bottom-right (r=8,c=8, eob 21) decode to y-mode DC_PRED (0);
+   top-right (r=0,c=8, eob 16) and bottom-left (r=8,c=0, eob 21) decode to
+   y-mode PAETH_PRED (12) -- i.e. the real encoder genuinely chose
+   PAETH_PRED for two of the four leaves, not merely a value this repo
+   assumed (note this split -- Paeth for the two blocks with exactly ONE
+   real neighbor, DC for the two with zero or two real neighbors -- was
+   the actual observed RD outcome, not the a priori expectation when this
+   fixture's content was designed; see the test's own commentary)."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-paeth.obu"))
+
+(defn keyframe-64x64-paeth-golden-yuv
+  "dav1d's raw 8-bit gray decode of `keyframe-64x64-paeth-bytes` -- see its
+   docstring."
+  []
+  (load-resource "av1/fixtures/keyframe-64x64-paeth.dav1d.yuv"))

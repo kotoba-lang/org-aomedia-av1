@@ -68,10 +68,16 @@
    TX_32X64 TX_64X32 TX_64X64 TX_64X64 TX_64X64 TX_64X64 TX_4X16 TX_16X4 TX_8X32
    TX_32X8 TX_16X64 TX_64X16])
 
-;; 09.parsing.process.md "intra_frame_y_mode": Intra_Mode_Context[INTRA_MODES].
-;; Intra_Mode_Context[DC_PRED(=0)] == 0, which is why every intra_frame_y_mode
-;; ctx in this repo's DC_PRED-only scope is always (0,0) -- see
-;; av1.decode-block namespace docstring.
+;; 09.parsing.process.md "intra_frame_y_mode": Intra_Mode_Context[INTRA_MODES],
+;; transcribed in full (all 13 entries, not just the DC/V/H-reachable
+;; prefix -- see av1.decode-block/read-y-mode's ctx-of, which looks up a
+;; neighbor's ALREADY-DECODED YMode here). Intra_Mode_Context[DC_PRED(=0)]
+;; == Intra_Mode_Context[PAETH_PRED(=12)] == 0, which is why every
+;; intra_frame_y_mode ctx in this repo's {DC_PRED,V_PRED,H_PRED,PAETH_PRED}
+;; scope is always (0,0) as long as no neighbor ever decoded to V_PRED/
+;; H_PRED (ctx 1/2) -- see av1.decode-block namespace docstring's PAETH
+;; section for why PAETH_PRED specifically doesn't introduce any new
+;; reachable ctx pair.
 (def Intra-Mode-Context [0 1 2 3 4 4 4 4 3 0 1 2 0])
 
 ;; 08.decoding.process.md #Butterfly functions: Cos128_Lookup[65].
@@ -147,21 +153,21 @@
 ;; Default_Intra_Frame_Y_Mode_Cdf[abovemode=0][leftmode=0] row only
 ;; (14 entries: 13-symbol cdf + adaptation counter) -- av1.decode-block
 ;; properly computes the real (abovemode,leftmode) ctx from each leaf's
-;; actual neighbor YModes (via Intra-Mode-Context-Dc-V-H below) and throws
-;; if it's ever anything other than (0,0), since this is the only
+;; actual neighbor YModes (via Intra-Mode-Context above -- see its docstring)
+;; and throws if it's ever anything other than (0,0), since this is the only
 ;; TileIntraFrameYModeCdf[abovemode][leftmode] entry transcribed (out of
 ;; the full 5x5 abovemode/leftmode space -- see av1.decode-block namespace
-;; docstring).
+;; docstring). The row's 13 cdf symbols cover every INTRA_MODES value
+;; (0..12, including PAETH_PRED=12), not just DC/V/H -- only the *row
+;; selection* (which (abovemode,leftmode) ctx pair) was ever restricted, not
+;; this row's own symbol coverage; the PAETH-coverage extension (see
+;; av1.decode-block namespace docstring's PAETH section) only needed to
+;; widen ctx-of's neighbor-mode lookup (Intra-Mode-Context, above -- already
+;; transcribed in full and already maps PAETH_PRED(12)->0, same as
+;; DC_PRED(0)->0) to allow PAETH_PRED as a decodable/re-consultable neighbor
+;; mode, not any change to this cdf row itself.
 (def Default-Intra-Frame-Y-Mode-Cdf-0-0
   [15588 17027 19338 20218 20682 21110 21825 23244 24189 28165 29093 30466 32768 0])
-
-;; Intra_Mode_Context[INTRA_MODES] (09.parsing.process.md "intra_frame_y_mode"
-;; cdf selection), restricted to the indices av1.decode-block/read-y-mode can
-;; ever produce (DC_PRED=0, V_PRED=1, H_PRED=2 -- everything else already
-;; throws before this table would be consulted). Full spec table is
-;; `{0,1,2,3,4,4,4,4,3,0,1,2,0}`; only the first 3 entries are reachable
-;; here, so only those are transcribed.
-(def Intra-Mode-Context-Dc-V-H [0 1 2])
 
 ;; MAX_ANGLE_DELTA / ANGLE_STEP (03.symbols.md) -- angle_delta_y's decoded
 ;; symbol (0..2*MAX_ANGLE_DELTA) maps to AngleDeltaY = symbol - MAX_ANGLE_DELTA.

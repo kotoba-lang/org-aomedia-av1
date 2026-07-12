@@ -34,7 +34,16 @@
    `--min-partition-size=16 --max-partition-size=16` to reach BLOCK_16X16),
    av1.decode-block's tx-size scope guard rejects it with ex-info against
    REAL encoded bits, rather than only in a synthetic/direct-table-lookup
-   unit test -- see test/av1/fixtures.clj's docstring."
+   unit test -- see test/av1/fixtures.clj's docstring.
+
+   `keyframe-64x64-paeth` (Migration step 9 continuation, PAETH_PRED
+   mode-coverage extension) extends the DC/V/H_PRED luma mode set to also
+   include PAETH_PRED (spec 7.11.2.2 \"Basic intra prediction process\") --
+   see av1.decode-block/av1.intra-pred namespace docstrings' PAETH
+   sections and test/av1/fixtures.clj's docstring for the additively-
+   separable diagonal-ramp content design that makes a real aomenc encode
+   genuinely choose PAETH_PRED (not merely DC_PRED) for two of the four
+   BLOCK_32X32 leaves."
   (:require [clojure.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
@@ -343,6 +352,49 @@
              DC_PRED's blended average")))
     (testing "reconstructed luma plane is bit-exact against dav1d's
               independent decode (no tolerance)"
+      (is (= 4096 (count luma-plane)))
+      (is (= golden luma-plane)))))
+
+(deftest paeth-pred-64x64-bit-exact-test
+  (let [bytes (fixtures/keyframe-64x64-paeth-bytes)
+        golden (golden-vec (fixtures/keyframe-64x64-paeth-golden-yuv))
+        {:keys [frame-header leaves luma-plane]} (decode-luma-plane+leaves bytes)]
+    (testing "frame geometry: 64x64, one 64x64 superblock forced to split
+              into a 2x2 grid of BLOCK_32X32 leaves (--min-partition-size=32
+              --max-partition-size=32, see test/av1/fixtures.clj docstring)"
+      (is (= 64 (:frame-width frame-header)))
+      (is (= 64 (:frame-height frame-header)))
+      (is (= 4 (count leaves)) "top-left/top-right/bottom-left/bottom-right"))
+    (testing "every leaf is BLOCK_32X32/PARTITION_NONE/TX_32X32 (this
+              namespace's per-block scope is unchanged by the PAETH_PRED
+              mode-coverage extension)"
+      (doseq [leaf leaves]
+        (is (= tg/BLOCK_32X32 (:b-size leaf)))
+        (is (= tg/PARTITION_NONE (:partition leaf)))
+        (is (= 3 (get-in leaf [:decode-block :tx-size])) "TX_32X32")))
+    (testing "the real encoder actually chose PAETH_PRED (not merely a
+              value this repo assumed) for two of the four leaves -- see
+              test/av1/fixtures.clj docstring for the additively-separable
+              diagonal-ramp content design and why it favors Paeth's
+              corner-based predictor over DC_PRED's blended average"
+      (let [[tl tr bl br] leaves]
+        (is (= db/DC_PRED (get-in tl [:decode-block :y-mode]))
+            "top-left: no neighbors at all, forces DC_PRED trivially")
+        (is (= db/PAETH_PRED (get-in tr [:decode-block :y-mode]))
+            "top-right: real avail-left neighbor only (top-left) -- Paeth's
+             AboveRow[-1]-anchored formula fits this ramp better than DC's
+             average")
+        (is (= db/PAETH_PRED (get-in bl [:decode-block :y-mode]))
+            "bottom-left: real avail-above neighbor only (top-left) --
+             symmetric case to top-right")
+        (is (= db/DC_PRED (get-in br [:decode-block :y-mode]))
+            "bottom-right: real avail-above AND avail-left neighbors --
+             empirically the real encoder's RD search still preferred
+             DC_PRED here (not assumed a priori when this fixture's content
+             was designed -- see test/av1/fixtures.clj docstring)")))
+    (testing "reconstructed luma plane is bit-exact against dav1d's
+              independent decode of the same real encoded bitstream (no
+              tolerance)"
       (is (= 4096 (count luma-plane)))
       (is (= golden luma-plane)))))
 
