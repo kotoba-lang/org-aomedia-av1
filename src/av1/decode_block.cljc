@@ -83,30 +83,52 @@
        call at all (unlike luma, which does call it, itself a zero-bit
        forced read).
 
-       CROSS-BLOCK CHROMA CONTEXT (SCOPE BOUNDARY): unlike luma (which
-       tracks real cross-leaf AboveDcContext/LeftDcContext/YModes for the
-       multi-leaf V_PRED/H_PRED fixtures), this namespace's chroma support
-       is validated ONLY for a single BLOCK_32X32 leaf covering the WHOLE
-       frame (mirroring the ORIGINAL single-leaf DC_PRED-only luma
-       milestone, before the multi-leaf mode-coverage extension) --
-       `AvailU`/`AvailL` (hence `AvailUChroma`/`AvailLChroma`, identical
-       here) must both be false, or this namespace throws
-       `:unsupported-multi-leaf-chroma`. The per-plane AboveDcContext/
-       LeftDcContext/AboveLevelContext/LeftLevelContext maps
-       (`record-above!`/`record-left!`/`get-dc-sign-ctx`/
-       `get-txb-skip-ctx-chroma` below) ARE implemented as real map lookups
-       (not hardcoded constants) so a future multi-leaf-chroma extension
-       only needs to lift this one guard, not rederive the context
-       machinery -- but for now, since no second chroma leaf ever exists to
-       query them, every chroma ctx this phase's fixtures exercise is
-       provably the same value a real cross-leaf-aware implementation would
-       produce (all context maps start empty and are only ever read back by
-       a leaf that can't exist yet). The U (Cb) and V (Cr) planes are
-       decoded with genuinely SHARED coefficient-CDF adaptation state (see
-       `chroma-spec` below) -- matching the spec exactly (`ptype` is
-       \"luma vs chroma\", not \"Y vs U vs V\"; TileTxbSkipCdf/
-       TileCoeffBaseCdf/etc. are single arrays adapted first by U's reads,
-       then continued by V's reads) -- but separate, per-plane
+       CROSS-BLOCK CHROMA CONTEXT / MULTI-LEAF CHROMA (SCOPE BOUNDARY,
+       updated -- multi-leaf-chroma extension, ADR-2607122000 Migration
+       step 9 continuation): this namespace's chroma support is now
+       validated for real MULTI-leaf color frames too, but ONLY for the
+       simple \"one luma leaf -> one independent chroma block\"
+       correspondence: every leaf's `mi-size` must be BLOCK_32X32 (this
+       namespace's only supported luma leaf size, enforced independently by
+       `tx-size-for` below) -- a BLOCK_32X32 luma leaf (bw4=bh4=8, never 1)
+       always has HasChroma=true and subsamples (4:2:0) to exactly ONE
+       BLOCK_16X16 chroma block, i.e. chroma block size is exactly half the
+       luma leaf size in each dimension, a clean 1:1 correspondence. The AV1
+       spec's \"shared chroma block\" case -- where a small luma partition
+       (bw4==1 or bh4==1, i.e. below BLOCK_16X16-equivalent luma leaves)
+       makes HasChroma false for some leaves so that MULTIPLE luma leaves
+       share ONE chroma block -- is NOT implemented: `make-decode-block-fn`'s
+       returned callback throws `:unsupported-shared-chroma-block` for any
+       color-frame leaf whose `mi-size` isn't BLOCK_32X32, rather than
+       silently mis-decoding (in practice this is unreachable today since
+       `tx-size-for` already restricts every leaf, color or not, to
+       BLOCK_32X32 via a different, non-chroma-specific reason
+       (`:unsupported-tx-size`) -- this guard exists so the chroma-specific
+       reason is explicit and this namespace fails safely even if a future
+       change ever loosens `tx-size-for` on its own).
+
+       The per-plane AboveDcContext/LeftDcContext/AboveLevelContext/
+       LeftLevelContext maps (`record-above!`/`record-left!`/
+       `get-dc-sign-ctx`/`get-txb-skip-ctx-chroma` below) ARE real map
+       lookups keyed by absolute (subsampled) position, exactly mirroring
+       luma's YModes/Skips/AboveDcContext/LeftDcContext pattern -- so
+       threading them across multiple leaves needed NO new plumbing beyond
+       lifting the old single-leaf-only guard: every chroma leaf's
+       `decode-transform-block` call already derives its OWN chroma
+       row/col/pixel-position from THAT leaf's own (luma) row/col (via
+       `:subx`/`:suby` in `spec`), and the whole `state` map (including
+       every per-plane context map and the persistent :u-plane/:v-plane
+       pixel buffers) is threaded leaf-to-leaf by av1.tile-group's
+       decode-partition the same way it always was for luma -- so a second
+       leaf's chroma ctx now genuinely sees the first leaf's real
+       AboveLevelContext/AboveDcContext, the same way luma's multi-leaf
+       V_PRED/H_PRED fixtures already exercised for `y-modes`/`above-dc`/
+       `left-dc`. The U (Cb) and V (Cr) planes are decoded with genuinely
+       SHARED coefficient-CDF adaptation state (see `chroma-spec` below) --
+       matching the spec exactly (`ptype` is \"luma vs chroma\", not \"Y vs
+       U vs V\"; TileTxbSkipCdf/TileCoeffBaseCdf/etc. are single arrays
+       adapted first by U's reads, then continued by V's reads, and now
+       across every leaf in raster order too) -- but separate, per-plane
        AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext
        (spec: these ARE separately indexed by literal plane 1 vs 2);
      - luma-only frames (mono_chrome=1, num_planes=1) remain fully
@@ -843,14 +865,19 @@
                        :delta-q-dc (:delta-q-v-dc quant-params) :delta-q-ac (:delta-q-v-ac quant-params)})
         luma-spec (merge luma-spec-base {:delta-q-dc (:delta-q-y-dc quant-params) :delta-q-ac 0})]
     (fn [state row col mi-size avail-u? avail-l?]
-      ;; SCOPE (see namespace docstring's cross-block-context section):
-      ;; chroma residual is only validated for a single whole-frame leaf
-      ;; (no real cross-leaf AboveLevelContext/AboveDcContext tracking
-      ;; between TWO chroma leaves yet) -- throw rather than silently
-      ;; mis-decode a second leaf's chroma.
-      (when (and color? (or avail-u? avail-l?))
-        (throw (ex-info "av1.decode-block: out of scope: chroma residual only supported for a single whole-frame BLOCK_32X32 leaf (no cross-leaf chroma AboveLevelContext/AboveDcContext tracking yet)"
-                         {:reason :unsupported-multi-leaf-chroma})))
+      ;; SCOPE (see namespace docstring's multi-leaf-chroma section):
+      ;; multi-leaf chroma IS now supported, but only for the simple
+      ;; "one luma leaf -> one independent chroma block" correspondence,
+      ;; i.e. every leaf's mi-size must be BLOCK_32X32 (this namespace's
+      ;; only supported luma leaf size -- subsamples 4:2:0 to exactly one
+      ;; BLOCK_16X16 chroma block, HasChroma always true). Any other
+      ;; mi-size for a color frame is the AV1 spec's "shared chroma block"
+      ;; case (small luma partitions where HasChroma can be false and
+      ;; MULTIPLE luma leaves share ONE chroma block) -- not implemented,
+      ;; throw explicitly rather than silently mis-decode.
+      (when (and color? (not= mi-size tg/BLOCK_32X32))
+        (throw (ex-info "av1.decode-block: out of scope: shared chroma block (luma leaf mi-size != BLOCK_32X32) not supported for color frames"
+                         {:reason :unsupported-shared-chroma-block :mi-size mi-size})))
       (let [[skip state1] (read-skip state row col avail-u? avail-l?)
             state1 (read-cdef state1 row col (pos? skip) coded-lossless? enable-cdef? allow-intrabc?)
             ;; intra_segment_id(): segmentation_enabled forced 0 by

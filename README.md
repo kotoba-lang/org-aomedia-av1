@@ -20,8 +20,9 @@ Cb/Cr) reconstruction against real encoded data, deliberately scoped narrow
 (see `av1.decode-block`'s namespace docstring for the exact boundary:
 BLOCK_32X32 leaves (single- or, for the V_PRED/H_PRED mode-coverage
 extension below, real multi-leaf) / TX_32X32 / DCT_DCT / DC_PRED+V_PRED+
-H_PRED for luma; TX_16X16 / DCT_DCT / UV_DC_PRED-only, 4:2:0, single-leaf-
-only for chroma). AV1's spec is far larger than H.264's, so
+H_PRED for luma; TX_16X16 / DCT_DCT / UV_DC_PRED-only, 4:2:0, single- or (per
+the multi-leaf-chroma extension below, for the simple 1:1 luma-leaf/chroma-
+block correspondence only) multi-leaf for chroma). AV1's spec is far larger than H.264's, so
 per the ADR this repo does **not** attempt broad common-code sharing with
 H.264 -- only `codec-primitives`'s narrow generic shapes
 (`BlockTransform`/`QuantScale` protocols, `scan`/`unscan`) are candidates
@@ -209,19 +210,35 @@ boundary and rationale; summarized:
   parsed all four deltas -- no frame-header changes were needed for this
   extension), vs. luma's `base_q_idx + delta_q_y_dc` (DC) /
   `base_q_idx` (AC, no luma AC delta exists in the spec).
-- **SCOPE BOUNDARY: single whole-frame leaf only (no multi-leaf chroma
-  yet).** Unlike luma (which validates real multi-leaf frames via the
-  V_PRED/H_PRED fixtures above), chroma decode is validated ONLY for a
-  single BLOCK_32X32 leaf covering the entire frame (`AvailU`/`AvailL`
-  both false) -- `av1.decode-block/make-decode-block-fn`'s returned
-  callback throws `:unsupported-multi-leaf-chroma` if a color frame's leaf
-  has either avail flag true. This mirrors the ORIGINAL (pre-V_PRED/H_PRED)
-  luma milestone's scope, landed as its own narrow step per this repo's
-  practice of extending one axis at a time. The per-plane
-  AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext machinery
-  above is nonetheless implemented generally (real map lookups, not
-  hardcoded), so lifting this one guard is the only work a future
-  multi-leaf-chroma extension needs.
+- **Multi-leaf chroma, updated (ADR-2607122000 Migration step 9
+  continuation): real multi-leaf color frames are now supported, for the
+  simple 1:1 luma-leaf/chroma-block correspondence only.** The original
+  chroma-decode milestone above validated ONLY a single BLOCK_32X32 leaf
+  covering the entire frame; this extension lifts that guard for the case
+  where every leaf's `mi-size` is BLOCK_32X32 (this namespace's only
+  supported luma leaf size) -- each such leaf subsamples (4:2:0) to exactly
+  ONE independent BLOCK_16X16 chroma block (chroma block size exactly half
+  the luma leaf size in each dimension), so multiple BLOCK_32X32 leaves
+  each simply get their own chroma block, with no shared state between
+  chroma blocks other than the real per-plane
+  AboveDcContext/LeftDcContext/AboveLevelContext/LeftLevelContext threading
+  (already implemented generally as real map lookups by the original
+  milestone, unchanged here) and the U/V planes' shared coefficient-CDF
+  adaptation state (also unchanged). `av1.decode-block/make-decode-block-fn`'s
+  returned callback now throws `:unsupported-shared-chroma-block` (not
+  `:unsupported-multi-leaf-chroma`, which no longer exists) if a
+  color-frame leaf's `mi-size` is anything OTHER than BLOCK_32X32 -- this is
+  the AV1 spec's "shared chroma block" case (small luma partitions, bw4==1
+  or bh4==1, where HasChroma can be false and MULTIPLE luma leaves share
+  ONE chroma block), which is NOT implemented and is out of scope for a
+  future extension. In practice this guard is currently unreachable by a
+  real bitstream (this namespace's `tx-size-for` already restricts every
+  leaf, color or not, to BLOCK_32X32 via the unrelated `:unsupported-tx-size`
+  reason first), but it's kept explicit so the chroma-specific reason is
+  clear and this namespace fails safely even if `tx-size-for`'s own scope
+  is ever loosened independently. See `av1.decode-block`'s namespace
+  docstring for the full rationale and `keyframe-64x64-color-multileaf`
+  below for the real bit-exact multi-leaf-chroma regression fixture.
 - **Monochrome streams are unaffected.** `guard-frame-scope!`'s
   color-format check now accepts EITHER `mono_chrome=1` (luma-only, all
   pre-existing fixtures/tests) OR `mono_chrome=0` with `num_planes=3`/
@@ -456,17 +473,48 @@ output -- 1024 Y + 256 U + 256 V bytes -- are checked in under
 exactly how each was produced). `av1.decode-block-test` additionally
 confirms (not merely infers) the real encoder chose DC_PRED/UV_DC_PRED
 and the single BLOCK_32X32/PARTITION_NONE/TX_32X32(luma)/TX_16X16(chroma)
-leaf shape, and a third test (`multi-leaf-color-throws-test`) confirms
-that a simulated second leaf (avail-u?/avail-l? both true) for a color
-frame is rejected with `ex-info` (`:reason :unsupported-multi-leaf-chroma`)
-rather than silently mis-decoded, per this extension's single-whole-frame-
-leaf scope boundary (see the chroma-decode section above).
+leaf shape.
 
-Not yet exercised against real data: MULTI-leaf color frames (no real
-cross-leaf chroma AboveLevelContext/AboveDcContext tracking yet, see
-scope boundary above), any UVMode other than UV_DC_PRED (including
-UV_CFL_PRED), 4:2:2/4:4:4 chroma subsampling, any chroma transform size
-other than TX_16X16, and inter prediction.
+Not yet exercised against real data (at the time these two fixtures were
+authored; see the multi-leaf-chroma extension below): MULTI-leaf color
+frames, any UVMode other than UV_DC_PRED (including UV_CFL_PRED),
+4:2:2/4:4:4 chroma subsampling, any chroma transform size other than
+TX_16X16, and inter prediction.
+
+### Multi-leaf chroma (`av1.decode-block-test`, `keyframe-64x64-color-multileaf`)
+
+Validates the multi-leaf-chroma extension against a REAL aomenc-encoded
+64x64 4:2:0 COLOR keyframe, forced (via `--min-partition-size=32
+--max-partition-size=32`, same technique as `keyframe-64x64-vpred.obu`) into
+a real 2x2 grid of BLOCK_32X32 luma leaves -- each leaf gets its OWN
+independent BLOCK_16X16 Cb/Cr block, comparing this repo's reconstructed
+luma AND Cb AND Cr planes against **dav1d's independent decode of the same
+bitstream, bit-exactly (no tolerance) on all three planes**. Content uses a
+DIFFERENT frequency+amplitude sinusoidal combination per quadrant per plane
+(not merely a phase shift), so the 4 leaves have genuinely different
+coefficient complexity -- confirmed empirically: `:eob`/`:u-eob`/`:v-eob`
+are 16/7/6 (top-left), 154/92/78 (top-right), 67/29/16 (bottom-left),
+277/121/136 (bottom-right), all pairwise distinct per plane, and the 4
+leaves' reconstructed 16x16 Cb/Cr quadrants (pulled directly out of the
+shared 32x32 plane buffers) are pairwise distinct pixel content -- both
+confirm 4 genuinely independently-decoded chroma blocks, not one leaf's
+result reused/broadcast across all 4 (see `test/av1/fixtures.clj`'s
+docstring for the exact aomenc invocation and content formulas, and
+`test/av1/decode_block_test.clj`'s `multi-leaf-color-64x64-bit-exact-test`
+for the assertions). A companion test (`shared-chroma-block-throws-test`)
+confirms that a leaf whose `mi-size` is NOT BLOCK_32X32 (the AV1 spec's
+"shared chroma block" case for small luma partitions) is rejected with
+`ex-info` (`:reason :unsupported-shared-chroma-block`) rather than silently
+mis-decoded, per this extension's scope boundary (see the multi-leaf-chroma
+section above).
+
+Not yet exercised against real data: shared chroma blocks (small luma
+partitions below BLOCK_32X32, where multiple luma leaves would share one
+chroma block -- this repo's luma leaf-size support doesn't reach that case
+via any other guard either, see `av1.decode-block`'s namespace docstring),
+any UVMode other than UV_DC_PRED (including UV_CFL_PRED), 4:2:2/4:4:4
+chroma subsampling, any chroma transform size other than TX_16X16, and
+inter prediction.
 
 ### Partition scope boundary (`av1.decode-block-test`, `keyframe-64x64-split16`)
 
