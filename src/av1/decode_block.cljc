@@ -398,8 +398,8 @@
 
 (defn- tx-size-for [mi-size]
   (let [tx-sz (nth tables/Max-Tx-Size-Rect mi-size)]
-    (when (not= tx-sz tables/TX_32X32)
-      (throw (ex-info "av1.decode-block: out of scope: only TX_32X32 is a supported transform size"
+    (when (not (contains? #{tables/TX_32X32 tables/TX_4X4} tx-sz))
+      (throw (ex-info "av1.decode-block: out of scope: only TX_32X32/TX_4X4 are supported transform sizes"
                        {:reason :unsupported-tx-size :tx-size tx-sz :mi-size mi-size})))
     tx-sz))
 
@@ -409,22 +409,64 @@
 ;; transform_type() when plane==0, per spec; chroma's TxType comes from
 ;; compute_tx_type()'s Mode_To_Txfm[UVMode] path instead, a *different* code
 ;; path that reads zero bits unconditionally for UV_DC_PRED (see namespace
-;; docstring) and therefore needs no analogous read fn at all. For
+;; docstring) and therefore needs no analogous read fn at all.
+;;
+;; get_tx_set() is now transcribed in full (all branches -- is_inter is
+;; always 0 in this repo's intra-only scope, so only the "else" branch of
+;; the spec's get_tx_set is reachable/implemented; the is_inter branch
+;; would need TX_SET_INTER_1/2/3, structurally unreachable here). For
 ;; TX_32X32, Tx_Size_Sqr_Up[TX_32X32] == TX_32X32 forces get_tx_set() to
-;; return TX_SET_DCTONLY (0), so `set > 0` in transform_type() is always
-;; false and TxType is assigned DCT_DCT with *zero bits read* -- a
-;; structural guarantee of the bitstream syntax for this tx size, not a
-;; probabilistic outcome (see namespace docstring). Asserted (not silently
-;; assumed) below.
+;; return TX_SET_DCTONLY unconditionally, so `set > 0` in transform_type()
+;; is always false and TxType is assigned DCT_DCT with *zero bits read* --
+;; a structural guarantee of the bitstream syntax for this tx size, not a
+;; probabilistic outcome (see namespace docstring) -- unchanged from
+;; before the ADST extension. For TX_4X4 (the ADST extension's new tx
+;; size, see namespace docstring's ADST section), get_tx_set() returns
+;; TX_SET_INTRA_1 (or TX_SET_INTRA_2 if reduced_tx_set==1), a REAL cdf
+;; read against av1.tables/Default-Intra-Tx-Type-Set1-Cdf-4x4-Dc-V-H (or
+;; ...-Set2-Cdf-Uniform), restricted to {DCT_DCT,ADST_DCT,DCT_ADST,
+;; ADST_ADST} -- any other decoded TxType (IDTX/V_DCT/H_DCT, structurally
+;; reachable symbol values in TX_SET_INTRA_1/2 but not implemented by
+;; av1.transform, see its namespace docstring) throws.
 
-(defn- read-transform-type [tx-sz]
-  (when (not= tx-sz tables/TX_32X32)
-    (throw (ex-info "av1.decode-block: internal: read-transform-type only supports TX_32X32"
-                     {:reason :unsupported-tx-size})))
-  ;; Tx_Size_Sqr_Up[TX_32X32] == TX_32X32 -> get_tx_set() == TX_SET_DCTONLY
-  ;; (0) unconditionally -> transform_type()'s `set > 0` is false -> TxType
-  ;; forced to DCT_DCT, zero bits read.
-  DCT_DCT)
+(defn- get-tx-set
+  "spec #Get transform set function, is_inter==0 branch only (this repo is
+   intra-only). Returns :dctonly / :intra-1 / :intra-2 (keyword-encoded,
+   see Tx-Type-Intra-Inv-Set1/2's docstring for why keywords)."
+  [tx-sz reduced-tx-set?]
+  (let [tx-sz-sqr (nth tables/Tx-Size-Sqr tx-sz)
+        tx-sz-sqr-up (nth tables/Tx-Size-Sqr-Up tx-sz)]
+    (cond
+      (> tx-sz-sqr-up tables/TX_32X32) :dctonly
+      (= tx-sz-sqr-up tables/TX_32X32) :dctonly
+      reduced-tx-set? :intra-2
+      (= tx-sz-sqr tables/TX_16X16) :intra-2
+      :else :intra-1)))
+
+(defn- read-transform-type
+  "spec #Transform type syntax's `transform_type(x4,y4,txSz)`, is_inter==0
+   branch. `y-mode` is the block's actual YMode (== intraDir, since
+   use_filter_intra is always 0 in this scope -- see 09.parsing.process.md
+   \"intra_tx_type\" cdf selection). `base-q-idx`/`reduced-tx-set?` come
+   from the frame header. Returns [tx-type state'] where tx-type is one of
+   the keywords :DCT_DCT/:ADST_DCT/:DCT_ADST/:ADST_ADST (throws for any
+   other decoded value -- see namespace docstring)."
+  [state tx-sz y-mode base-q-idx reduced-tx-set?]
+  (let [set (get-tx-set tx-sz reduced-tx-set?)]
+    (if (or (= set :dctonly) (zero? base-q-idx))
+      [:DCT_DCT state]
+      (let [tx-sz-sqr (nth tables/Tx-Size-Sqr tx-sz)
+            ctx-key [tx-sz-sqr y-mode]
+            [cdf-key default-row inv-table]
+            (if (= set :intra-1)
+              [:intra-tx-type-set1-cdf (nth tables/Default-Intra-Tx-Type-Set1-Cdf-4x4-Dc-V-H y-mode) tables/Tx-Type-Intra-Inv-Set1]
+              [:intra-tx-type-set2-cdf tables/Default-Intra-Tx-Type-Set2-Cdf-Uniform tables/Tx-Type-Intra-Inv-Set2])
+            [sym state'] (read-cdf-symbol state cdf-key ctx-key default-row)
+            tx-type (nth inv-table sym)]
+        (when (contains? #{:IDTX :V-DCT :H-DCT} tx-type)
+          (throw (ex-info "av1.decode-block: out of scope: transform_type decoded outside {DCT_DCT,ADST_DCT,DCT_ADST,ADST_ADST}"
+                           {:reason :unsupported-tx-type :tx-type tx-type})))
+        [tx-type state']))))
 
 ;; ---------------------------------------------------------------------
 ;; coeffs() -- spec #Coefficients syntax (5.11.39), generalized over
@@ -648,9 +690,18 @@
    (get-coeff-base-ctx/get-coeff-br-ctx) needs read access to whatever has
    already been decoded into `quant` so far, which is simplest to express
    as \"the current persistent value\" rather than juggling transient
-   checkpoints."
-  [state q-idx row col mi-cols mi-rows txb-skip-ctx spec]
-  (let [{:keys [plane bwl w seg-eob scan
+   checkpoints.
+
+   `y-mode`/`base-q-idx`/`reduced-tx-set?` are only consulted for plane==0
+   (transform_type()'s real cdf read, see read-transform-type) -- callers
+   for plane>0 (chroma) still pass them through for signature uniformity
+   but their values are never used (chroma's TxType is always :DCT_DCT via
+   a different, read-free code path, see namespace docstring). Returns
+   [eob quant tx-type state'] (tx-type added for the ADST extension --
+   plane>0 and the all_zero==1 case always return :DCT_DCT, matching the
+   spec's forced/no-op TxType assignments in those cases)."
+  [state q-idx row col mi-cols mi-rows txb-skip-ctx spec y-mode base-q-idx reduced-tx-set?]
+  (let [{:keys [plane bwl w seg-eob scan tx-sz
                 txb-skip-cdf-key txb-skip-table
                 eob-pt-cdf-key eob-pt-table eob-extra-cdf-key eob-extra-table
                 coeff-base-eob-cdf-key coeff-base-eob-table
@@ -661,20 +712,23 @@
         [all-zero state1] (read-cdf-symbol state txb-skip-cdf-key txb-skip-ctx
                                             (get-in txb-skip-table [q-idx txb-skip-ctx]))]
     (if (pos? all-zero)
-      [0 (vec (repeat seg-eob 0))
+      [0 (vec (repeat seg-eob 0)) :DCT_DCT
        (-> state1 (record-above! plane col w4 0 0) (record-left! plane row h4 0 0))]
       (let [dc-sign-ctx (get-dc-sign-ctx state1 plane col row w4 h4 mi-cols mi-rows)
-            ;; transform_type()/read-transform-type is luma-only (plane==0,
-            ;; zero bits, asserted DCT_DCT -- see its docstring); chroma's
-            ;; TxType is DCT_DCT with zero bits unconditionally for this
-            ;; namespace's UV_DC_PRED-only scope (see namespace docstring)
-            ;; via a DIFFERENT code path (compute_tx_type()'s
-            ;; Mode_To_Txfm[UVMode], not transform_type()) -- so plane>0
-            ;; never calls read-transform-type at all, only plane==0 does
-            ;; (still asserted here, not skipped, for parity/fidelity with
-            ;; the spec's real per-plane call structure).
-            _tx-type (when (zero? plane) (read-transform-type (if (= w 32) tables/TX_32X32 tables/TX_16X16)))
-            [eob state2] (read-eob state1 q-idx eob-pt-cdf-key eob-pt-table eob-extra-cdf-key eob-extra-table)
+            ;; transform_type()/read-transform-type is luma-only (plane==0)
+            ;; -- for TX_32X32 this remains a zero-bit forced :DCT_DCT read
+            ;; (see read-transform-type's docstring); for TX_4X4 (ADST
+            ;; extension) this is a REAL cdf read that can produce
+            ;; :ADST_DCT/:DCT_ADST/:ADST_ADST too. chroma's TxType is
+            ;; :DCT_DCT with zero bits unconditionally for this namespace's
+            ;; UV_DC_PRED-only scope (see namespace docstring) via a
+            ;; DIFFERENT code path (compute_tx_type()'s Mode_To_Txfm[UVMode],
+            ;; not transform_type()) -- so plane>0 never calls
+            ;; read-transform-type at all.
+            [tx-type state1b] (if (zero? plane)
+                                 (read-transform-type state1 tx-sz y-mode base-q-idx reduced-tx-set?)
+                                 [:DCT_DCT state1])
+            [eob state2] (read-eob state1b q-idx eob-pt-cdf-key eob-pt-table eob-extra-cdf-key eob-extra-table)
             ;; level pass: c = eob-1 downto 0 (spec: `for (c = eob-1; c >= 0; c--)`)
             [quant1 state3]
             (reduce
@@ -732,7 +786,7 @@
              (range eob))
             cul-level (min 63 cul-level)
             state5 (-> state4 (record-above! plane col w4 dc-category cul-level) (record-left! plane row h4 dc-category cul-level))]
-        [eob quant2 state5]))))
+        [eob quant2 tx-type state5]))))
 
 ;; ---------------------------------------------------------------------
 ;; predict_intra (DC_PRED/V_PRED/H_PRED) + reconstruct -- transform_block()
@@ -770,10 +824,11 @@
    its own `:plane`/`:delta-q-dc`/`:delta-q-ac`). `mode` is YMode (plane 0)
    or UV_DC_PRED (plane>0, always 0). `row`/`col` are the leaf's LUMA mi
    position (this fn derives the plane's own subsampled position/pixel
-   coordinates internally via `:subx`/`:suby` in `spec`)."
-  [state frame-hdr row col avail-u? avail-l? q-idx mode spec]
-  (let [{:keys [plane w subx suby delta-q-dc delta-q-ac plane-key]} spec
-        log2 (case w 32 5 16 4)
+   coordinates internally via `:subx`/`:suby` in `spec`). `reduced-tx-set?`
+   comes from the frame header (ADST extension -- see read-transform-type)."
+  [state frame-hdr row col avail-u? avail-l? q-idx mode spec reduced-tx-set?]
+  (let [{:keys [plane w subx suby delta-q-dc delta-q-ac plane-key tx-sz]} spec
+        log2 (case w 32 5 16 4 4 2)
         mi-cols (:mi-cols frame-hdr) mi-rows (:mi-rows frame-hdr)
         plane-mi-cols (bit-shift-right mi-cols subx) plane-mi-rows (bit-shift-right mi-rows suby)
         frame-w (* 4 plane-mi-cols) frame-h (* 4 plane-mi-rows)
@@ -787,22 +842,23 @@
         txb-skip-ctx (if (zero? plane)
                        0 ;; bw==w && bh==h for this phase's only luma block shape
                        (get-txb-skip-ctx-chroma state1 plane pcol prow w4 w4 w w w w plane-mi-cols plane-mi-rows))
-        [eob quant state2] (read-coeffs state1 q-idx prow pcol plane-mi-cols plane-mi-rows txb-skip-ctx spec)]
+        base-q-idx (:base-q-idx frame-hdr)
+        [eob quant tx-type state2] (read-coeffs state1 q-idx prow pcol plane-mi-cols plane-mi-rows txb-skip-ctx spec
+                                                 mode base-q-idx reduced-tx-set?)]
     (if (pos? eob)
-      (let [base-q-idx (:base-q-idx frame-hdr)
-            clip3 (fn [lo hi v] (cond (< v lo) lo (> v hi) hi :else v))
+      (let [clip3 (fn [lo hi v] (cond (< v lo) lo (> v hi) hi :else v))
             dc-q-index (clip3 0 255 (+ base-q-idx delta-q-dc))
             ac-q-index (clip3 0 255 (+ base-q-idx delta-q-ac))
             dc-quant (nth tables/Dc-Qlookup-8bit dc-q-index)
             ac-quant (nth tables/Ac-Qlookup-8bit ac-q-index)
-            dq-denom (xform/dq-denom (if (= w 32) tables/TX_32X32 tables/TX_16X16))
+            dq-denom (xform/dq-denom tx-sz)
             dequant (xform/dequantize quant w w dq-denom dc-quant ac-quant 8)
-            residual (xform/inverse-transform-2d dequant log2 log2 8)
+            residual (xform/inverse-transform-2d dequant log2 log2 8 tx-type)
             hi (dec (bit-shift-left 1 8))
             recon (mapv (fn [p r] (let [v (+ p r)] (cond (< v 0) 0 (> v hi) hi :else v))) pred residual)
             plane2 (write-block plane1 frame-w x y w w recon)]
-        [{:eob eob} (assoc state2 plane-key plane2)])
-      [{:eob 0} state2])))
+        [{:eob eob :tx-type tx-type} (assoc state2 plane-key plane2)])
+      [{:eob 0 :tx-type tx-type} state2])))
 
 ;; ---------------------------------------------------------------------
 ;; Plane specs -- bundles the tx-size shape (bwl/w/seg-eob/scan/subx/suby)
@@ -814,7 +870,7 @@
 
 (def ^:private luma-spec-base
   {:plane 0 :bwl 5 :w 32 :seg-eob 1024 :scan tables/Default-Scan-32x32
-   :subx 0 :suby 0 :plane-key :luma-plane
+   :subx 0 :suby 0 :plane-key :luma-plane :tx-sz tables/TX_32X32
    :txb-skip-cdf-key :txb-skip-cdfs :txb-skip-table tables/Default-Txb-Skip-Cdf-32x32
    :eob-pt-cdf-key :eob-pt-1024-cdf :eob-pt-table tables/Default-Eob-Pt-1024-Cdf-Luma
    :eob-extra-cdf-key :eob-extra-cdfs :eob-extra-table tables/Default-Eob-Extra-Cdf-32x32-Luma
@@ -823,13 +879,35 @@
    :coeff-br-cdf-key :coeff-br-cdfs :coeff-br-table tables/Default-Coeff-Br-Cdf-32x32-Luma
    :dc-sign-cdf-key :dc-sign-cdfs :dc-sign-table tables/Default-Dc-Sign-Cdf-Luma})
 
+;; luma-spec-4x4-base -- ADST extension (ADR-2607122000 Migration step 9
+;; continuation, see namespace docstring's ADST section): BLOCK_4X4 luma
+;; leaves (the smallest tx size this repo's partition tree can reach, spec
+;; #Decode partition syntax's PARTITION_SPLIT base case at BLOCK_8X8), for
+;; which get_tx_set() is NOT structurally forced to DCTONLY (unlike
+;; TX_32X32) -- read-transform-type performs a real cdf read that can
+;; select ADST_DCT/DCT_ADST/ADST_ADST (or throws for the structurally
+;; reachable but unsupported IDTX/V_DCT/H_DCT, see its docstring). Own
+;; cdf-key family (:txb-skip-cdfs-4x4 etc, distinct from luma-spec-base's
+;; :txb-skip-cdfs) since TileTxbSkipCdf[txSzCtx] etc are genuinely separate
+;; per-txSzCtx adaptation state in the spec, not shared with TX_32X32's.
+(def ^:private luma-spec-4x4-base
+  {:plane 0 :bwl 2 :w 4 :seg-eob 16 :scan tables/Default-Scan-4x4
+   :subx 0 :suby 0 :plane-key :luma-plane :tx-sz tables/TX_4X4
+   :txb-skip-cdf-key :txb-skip-cdfs-4x4 :txb-skip-table tables/Default-Txb-Skip-Cdf-4x4-Luma
+   :eob-pt-cdf-key :eob-pt-16-cdf :eob-pt-table tables/Default-Eob-Pt-16-Cdf-Luma
+   :eob-extra-cdf-key :eob-extra-cdfs-4x4 :eob-extra-table tables/Default-Eob-Extra-Cdf-4x4-Luma
+   :coeff-base-eob-cdf-key :coeff-base-eob-cdfs-4x4 :coeff-base-eob-table tables/Default-Coeff-Base-Eob-Cdf-4x4-Luma
+   :coeff-base-cdf-key :coeff-base-cdfs-4x4 :coeff-base-table tables/Default-Coeff-Base-Cdf-4x4-Luma
+   :coeff-br-cdf-key :coeff-br-cdfs-4x4 :coeff-br-table tables/Default-Coeff-Br-Cdf-4x4-Luma
+   :dc-sign-cdf-key :dc-sign-cdfs :dc-sign-table tables/Default-Dc-Sign-Cdf-Luma})
+
 ;; chroma-spec-base: the cdf-key family here (:txb-skip-cdfs-chroma etc.)
 ;; is SHARED between the U (plane 1) and V (plane 2) specs below -- see
 ;; namespace docstring's cross-block-context section for why this is
 ;; correct per spec (ptype, not literal plane).
 (def ^:private chroma-spec-base
   {:bwl 4 :w 16 :seg-eob 256 :scan tables/Default-Scan-16x16
-   :subx 1 :suby 1
+   :subx 1 :suby 1 :tx-sz tables/TX_16X16
    :txb-skip-cdf-key :txb-skip-cdfs-chroma :txb-skip-table tables/Default-Txb-Skip-Cdf-16x16-Chroma
    :eob-pt-cdf-key :eob-pt-256-cdf-chroma :eob-pt-table tables/Default-Eob-Pt-256-Cdf-Chroma
    :eob-extra-cdf-key :eob-extra-cdfs-chroma :eob-extra-table tables/Default-Eob-Extra-Cdf-16x16-Chroma
@@ -863,7 +941,12 @@
         v-spec (merge chroma-spec-base
                       {:plane 2 :plane-key :v-plane
                        :delta-q-dc (:delta-q-v-dc quant-params) :delta-q-ac (:delta-q-v-ac quant-params)})
-        luma-spec (merge luma-spec-base {:delta-q-dc (:delta-q-y-dc quant-params) :delta-q-ac 0})]
+        luma-spec-32 (merge luma-spec-base {:delta-q-dc (:delta-q-y-dc quant-params) :delta-q-ac 0})
+        ;; luma-spec-4x4 -- ADST extension (see luma-spec-4x4-base's
+        ;; docstring); picked per-leaf below by tx-sz, not captured once
+        ;; here, since a frame can now mix BLOCK_32X32 and BLOCK_4X4 leaves.
+        luma-spec-4x4 (merge luma-spec-4x4-base {:delta-q-dc (:delta-q-y-dc quant-params) :delta-q-ac 0})
+        reduced-tx-set? (pos? (:reduced-tx-set frame-hdr))]
     (fn [state row col mi-size avail-u? avail-l?]
       ;; SCOPE (see namespace docstring's multi-leaf-chroma section):
       ;; multi-leaf chroma IS now supported, but only for the simple
@@ -899,6 +982,17 @@
             [uv-mode state2] (if color? (read-uv-mode state2 y-mode) [nil state2])]
         (guard-no-filter-intra! enable-filter-intra? mi-size y-mode)
         (let [tx-sz (tx-size-for mi-size)
+              ;; ADST extension: pick this leaf's luma spec by its own
+              ;; tx-sz (a frame can mix BLOCK_32X32/TX_32X32 and
+              ;; BLOCK_4X4/TX_4X4 leaves, see namespace docstring).
+              luma-spec (cond (= tx-sz tables/TX_32X32) luma-spec-32
+                               (= tx-sz tables/TX_4X4) luma-spec-4x4)
+              ;; w/log2 for THIS leaf's luma plane (32/5 for TX_32X32,
+              ;; 4/2 for TX_4X4) -- used below for both the skip branch's
+              ;; predict-only path and its footprint bookkeeping.
+              [luma-w luma-log2] (cond (= tx-sz tables/TX_32X32) [32 5]
+                                        (= tx-sz tables/TX_4X4) [4 2])
+              luma-w4 (bit-shift-right luma-w 2)
               ;; spec #Decode block syntax: YModes[r+y][c+x]=YMode and
               ;; Skips[r+y][c+x]=skip are both written across the block's
               ;; WHOLE bw4xbh4 mi footprint (record-footprint!), not just
@@ -919,12 +1013,12 @@
             (let [frame-w (* 4 (:mi-cols frame-hdr)) frame-h (* 4 (:mi-rows frame-hdr))
                   x (* 4 col) y (* 4 row)
                   plane0 (or (:luma-plane state3) (vec (repeat (* frame-w frame-h) 0)))
-                  pred (predict-intra y-mode plane0 frame-w frame-h x y avail-l? avail-u? 5 5 8)
-                  plane1 (write-block plane0 frame-w x y 32 32 pred)
+                  pred (predict-intra y-mode plane0 frame-w frame-h x y avail-l? avail-u? luma-log2 luma-log2 8)
+                  plane1 (write-block plane0 frame-w x y luma-w luma-w pred)
                   state4 (-> state3
                              (assoc :luma-plane plane1)
-                             (record-above! 0 col 8 0 0)
-                             (record-left! 0 row 8 0 0))
+                             (record-above! 0 col luma-w4 0 0)
+                             (record-left! 0 row luma-w4 0 0))
                   state5 (if color?
                            (reduce
                             (fn [st spec]
@@ -944,10 +1038,10 @@
                             state4 [u-spec v-spec])
                            state4)]
               [{:skip true :tx-size tx-sz :y-mode y-mode :uv-mode uv-mode} state5])
-            (let [[luma-result state4] (decode-transform-block state3 frame-hdr row col avail-u? avail-l? q-idx y-mode luma-spec)
+            (let [[luma-result state4] (decode-transform-block state3 frame-hdr row col avail-u? avail-l? q-idx y-mode luma-spec reduced-tx-set?)
                   luma-result (assoc luma-result :skip false :tx-size tx-sz :y-mode y-mode :uv-mode uv-mode)]
               (if color?
-                (let [[u-result state5] (decode-transform-block state4 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED u-spec)
-                      [v-result state6] (decode-transform-block state5 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED v-spec)]
+                (let [[u-result state5] (decode-transform-block state4 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED u-spec reduced-tx-set?)
+                      [v-result state6] (decode-transform-block state5 frame-hdr row col avail-u? avail-l? q-idx UV_DC_PRED v-spec reduced-tx-set?)]
                   [(assoc luma-result :u-eob (:eob u-result) :v-eob (:eob v-result)) state6])
                 [luma-result state4]))))))))

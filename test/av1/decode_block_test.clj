@@ -486,10 +486,102 @@
             (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn})
             (is false "expected ex-info to be thrown, but decode completed without throwing")
             (catch clojure.lang.ExceptionInfo e
-              (is (re-find #"only TX_32X32 is a supported transform size" (.getMessage e)))
+              (is (re-find #"only TX_32X32/TX_4X4 are supported transform sizes" (.getMessage e)))
               (is (= :unsupported-tx-size (:reason (ex-data e))))
               (is (= tg/BLOCK_16X16 (:mi-size (ex-data e))))
               (is (= 2 (:tx-size (ex-data e))) "TX_16X16"))))))))
+
+(deftest adst-diag-8x8-bit-exact-test
+  (testing "ADST extension (ADR-2607122000 Migration step 9 continuation,
+            see av1.decode-block/av1.transform namespace docstrings' ADST
+            sections): a real aomenc encode of an 8x8 diagonal-edge
+            monochrome frame, forced into a 2x2 grid of BLOCK_4X4/TX_4X4
+            leaves (see test/av1/fixtures.clj docstring). Confirms the
+            real encoder actually chose ADST_ADST (not merely DCT_DCT) for
+            2 of the 4 leaves, and that this repo's reconstruction --
+            including a real av1.transform/inverse-adst4! invocation, not
+            just the transform_type() cdf read -- is bit-exact against
+            dav1d's independent decode."
+    (let [bytes (fixtures/keyframe-8x8-adst-diag-bytes)
+          golden (golden-vec (fixtures/keyframe-8x8-adst-diag-golden-yuv))
+          {:keys [frame-header leaves luma-plane]} (decode-luma-plane+leaves bytes)]
+      (testing "frame geometry: 8x8, one 64x64 superblock forced (via
+                --min-partition-size=4 --max-partition-size=4) all the way
+                down to a 2x2 grid of BLOCK_4X4 leaves"
+        (is (= 8 (:frame-width frame-header)))
+        (is (= 8 (:frame-height frame-header)))
+        (is (= 4 (count leaves)) "top-left/top-right/bottom-left/bottom-right"))
+      (testing "every leaf is BLOCK_4X4/PARTITION_NONE/TX_4X4 -- the ADST
+                extension's new leaf shape, not the pre-existing
+                BLOCK_32X32/TX_32X32 one"
+        (doseq [leaf leaves]
+          (is (= tg/BLOCK_4X4 (:b-size leaf)))
+          (is (= tg/PARTITION_NONE (:partition leaf)))
+          (is (= 0 (get-in leaf [:decode-block :tx-size])) "TX_4X4")))
+      (testing "the real encoder chose DC_PRED for every leaf (no neighbor
+                context ever favored V_PRED/H_PRED for this content at this
+                size), but ADST_ADST (not DCT_DCT) for the top-right and
+                bottom-left leaves -- confirmed by actually decoding and
+                inspecting the real chosen TxType, not assumed from the
+                content design alone"
+        (let [[tl tr bl br] leaves]
+          (is (= db/DC_PRED (get-in tl [:decode-block :y-mode])))
+          (is (= :DCT_DCT (get-in tl [:decode-block :tx-type])))
+          (is (= db/DC_PRED (get-in tr [:decode-block :y-mode])))
+          (is (= :ADST_ADST (get-in tr [:decode-block :tx-type]))
+              "real ADST selection, not DCT -- the primary assertion this
+               extension exists to make")
+          (is (= db/DC_PRED (get-in bl [:decode-block :y-mode])))
+          (is (= :ADST_ADST (get-in bl [:decode-block :tx-type])))
+          (is (= db/DC_PRED (get-in br [:decode-block :y-mode])))
+          (is (= :DCT_DCT (get-in br [:decode-block :tx-type])))))
+      (testing "reconstructed luma plane is bit-exact against dav1d's
+                independent decode of the same real encoded bitstream (no
+                tolerance) -- this is the primary regression test for
+                av1.transform/inverse-adst4!, exercised via 2 real
+                ADST_ADST leaves, not just unit-level butterfly math"
+        (is (= 64 (count luma-plane)))
+        (is (= golden luma-plane))))))
+
+(deftest adst-quad-8x8-bit-exact-test
+  (testing "same ADST-extension scope as adst-diag-8x8-bit-exact-test
+            above, but with a per-quadrant mixed edge pattern (see
+            test/av1/fixtures.clj docstring) -- broadens real-decode
+            validation to a SECOND ADST-family TxType, DCT_ADST (row=ADST,
+            col=DCT -- the opposite axis from ADST_ADST's both-axes case),
+            confirming av1.transform/inverse-transform-2d's row/col
+            transform-kind dispatch (row-transform-kind/col-transform-kind)
+            picks the correct axis, not just that SOME ADST path runs"
+    (let [bytes (fixtures/keyframe-8x8-adst-quad-bytes)
+          golden (golden-vec (fixtures/keyframe-8x8-adst-quad-golden-yuv))
+          {:keys [frame-header leaves luma-plane]} (decode-luma-plane+leaves bytes)]
+      (testing "frame geometry: 8x8, 2x2 grid of BLOCK_4X4/TX_4X4 leaves"
+        (is (= 8 (:frame-width frame-header)))
+        (is (= 8 (:frame-height frame-header)))
+        (is (= 4 (count leaves))))
+      (testing "every leaf is BLOCK_4X4/PARTITION_NONE/TX_4X4"
+        (doseq [leaf leaves]
+          (is (= tg/BLOCK_4X4 (:b-size leaf)))
+          (is (= tg/PARTITION_NONE (:partition leaf)))
+          (is (= 0 (get-in leaf [:decode-block :tx-size])))))
+      (testing "the real encoder chose DC_PRED for every leaf, and
+                DCT_ADST (not DCT_DCT or ADST_ADST) for the bottom-right
+                (diagonal-edge) leaf -- a genuinely different ADST-family
+                TxType than the diag fixture's ADST_ADST, confirming this
+                repo's transform_type() cdf read/mapping distinguishes
+                between ADST-family types correctly, not just ADST-vs-DCT"
+        (let [[tl tr bl br] leaves]
+          (is (= db/DC_PRED (get-in tl [:decode-block :y-mode])))
+          (is (= db/DC_PRED (get-in tr [:decode-block :y-mode])))
+          (is (= db/DC_PRED (get-in bl [:decode-block :y-mode])))
+          (is (= db/DC_PRED (get-in br [:decode-block :y-mode])))
+          (is (= :DCT_ADST (get-in br [:decode-block :tx-type]))
+              "real DCT_ADST selection -- confirms the row=ADST/col=DCT
+               axis dispatch, not just ADST_ADST's both-axes case")))
+      (testing "reconstructed luma plane is bit-exact against dav1d's
+                independent decode (no tolerance)"
+        (is (= 64 (count luma-plane)))
+        (is (= golden luma-plane))))))
 
 (deftest guard-frame-scope-throws-test
   (testing "make-decode-block-fn rejects out-of-scope frame headers instead

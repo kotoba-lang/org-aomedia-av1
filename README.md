@@ -69,12 +69,15 @@ require it). `decode_partition()`'s recursive partition-tree structure IS
 bit-exact all the way through `decode_block()` now (when `av1.decode-block`
 is wired in as the `:decode-block-fn`), including real MULTI-leaf frames
 (mode-coverage extension below), but **only** for the narrow shape
-`av1.decode-block`'s namespace docstring specifies -- ADST/FLIPADST/IDTX
-transform types, any intra mode other than DC_PRED/V_PRED/H_PRED (luma) or
-UV_DC_PRED (chroma, see below), any transform size other than TX_32X32
-(luma)/TX_16X16 (chroma), 4:2:2/4:4:4 chroma subsampling, and segmentation/
-delta-Q/delta-LF/screen-content-tools/intra-BC are all explicitly out of
-scope and throw `ex-info` rather than silently mis-decoding. Inter
+`av1.decode-block`'s namespace docstring specifies -- FLIPADST/IDTX/V_DCT/
+H_DCT transform types (DCT_DCT/ADST_DCT/DCT_ADST/ADST_ADST ARE supported,
+the latter three only for the ADST extension's TX_4X4/luma leaves, see
+below), any intra mode other than DC_PRED/V_PRED/H_PRED (luma) or
+UV_DC_PRED (chroma, see below), any transform size other than TX_32X32/
+TX_4X4 (luma)/TX_16X16 (chroma), 4:2:2/4:4:4 chroma subsampling, and
+segmentation/delta-Q/delta-LF/screen-content-tools/intra-BC are all
+explicitly out of scope and throw `ex-info` rather than silently
+mis-decoding. Inter
 prediction, loop-filter/CDEF/loop-restoration in-loop filtering, and film
 grain synthesis remain fully unimplemented (this phase's fixtures disable
 all in-loop filtering at the encoder, so the raw reconstruction this phase
@@ -231,20 +234,142 @@ boundary and rationale; summarized:
   the AV1 spec's "shared chroma block" case (small luma partitions, bw4==1
   or bh4==1, where HasChroma can be false and MULTIPLE luma leaves share
   ONE chroma block), which is NOT implemented and is out of scope for a
-  future extension. In practice this guard is currently unreachable by a
-  real bitstream (this namespace's `tx-size-for` already restricts every
-  leaf, color or not, to BLOCK_32X32 via the unrelated `:unsupported-tx-size`
-  reason first), but it's kept explicit so the chroma-specific reason is
-  clear and this namespace fails safely even if `tx-size-for`'s own scope
-  is ever loosened independently. See `av1.decode-block`'s namespace
-  docstring for the full rationale and `keyframe-64x64-color-multileaf`
-  below for the real bit-exact multi-leaf-chroma regression fixture.
+  future extension. Before the ADST extension below, this guard was
+  unreachable by a real bitstream (`tx-size-for` restricted every leaf,
+  color or not, to BLOCK_32X32 via the unrelated `:unsupported-tx-size`
+  reason first) -- now that `tx-size-for` also accepts BLOCK_4X4 (see the
+  ADST extension), a real *color* frame with a BLOCK_4X4 leaf WOULD reach
+  this guard and throw `:unsupported-shared-chroma-block` (this namespace's
+  ADST-extension fixtures are all monochrome, so this remains untested
+  against a real bitstream, but the guard itself is unchanged and still
+  correct). See `av1.decode-block`'s namespace docstring for the full
+  rationale and `keyframe-64x64-color-multileaf` below for the real
+  bit-exact multi-leaf-chroma regression fixture.
 - **Monochrome streams are unaffected.** `guard-frame-scope!`'s
   color-format check now accepts EITHER `mono_chrome=1` (luma-only, all
   pre-existing fixtures/tests) OR `mono_chrome=0` with `num_planes=3`/
   `subsampling_x=1`/`subsampling_y=1` (4:2:0 color) -- every chroma code
   path is gated on whether the frame is actually color, so monochrome
   streams never touch any of the above.
+
+### ADST transform extension (ADR-2607122000 Migration step 9, continued)
+
+The DCT_DCT-only milestones above have been extended to support **ADST**
+(Asymmetric Discrete Sine Transform, spec 7.13.2.6-7.13.2.9's "Inverse
+ADST process") for a new, smaller luma leaf shape: **BLOCK_4X4/TX_4X4**.
+Fetched/transcribed 2026-07-13 from AOMediaCodec/av1-spec master
+(same sections as the DCT work: 06.bitstream.syntax.md #Transform type
+syntax / #Get transform set function, 08.decoding.process.md #Inverse ADST4
+process / #2D inverse transform process, 09.parsing.process.md's
+`intra_tx_type` cdf selection, 10.additional.tables.md's
+`Default_Intra_Tx_Type_Set1/2_Cdf`); the ADST4 butterfly math was
+additionally cross-checked against a second, independent source --
+libaom's own C reference implementation (`av1_iadst4`,
+`av1/common/av1_inv_txfm1d.c`, AOMediaCodec/aom master) -- confirming the
+same SINPI_1_9..SINPI_4_9 constants and the same stage-for-stage algebra,
+not just a second read of the same spec paragraph.
+
+- **`get_tx_set()` is now transcribed in full** (`av1.decode-block/get-tx-set`,
+  is_inter==0 branch only -- this repo is intra-only): `TX_SET_DCTONLY`
+  when `Tx_Size_Sqr_Up[txSz] == TX_32X32` (unchanged, still forces DCT_DCT
+  with zero bits for TX_32X32/luma and TX_16X16/chroma), `TX_SET_INTRA_2`
+  when `reduced_tx_set` or `Tx_Size_Sqr[txSz] == TX_16X16`, else
+  `TX_SET_INTRA_1`. For this extension's only new tx size, TX_4X4, that's
+  `TX_SET_INTRA_1` (7 types: `IDTX,DCT_DCT,V_DCT,H_DCT,ADST_ADST,ADST_DCT,
+  DCT_ADST`) unless `reduced_tx_set==1`, in which case `TX_SET_INTRA_2` (5
+  types, dropping `V_DCT`/`H_DCT`) -- `av1.decode-block/read-transform-type`
+  performs a REAL cdf read against whichever set applies (previously,
+  before this extension, `transform_type()` was only ever a zero-bit
+  forced read since only TX_32X32 was supported).
+- **Restricted to {DCT_DCT, ADST_DCT, DCT_ADST, ADST_ADST}.** `IDTX`/
+  `V_DCT`/`H_DCT` are structurally reachable decoded values (both
+  TX_SET_INTRA_1 and _2 include them) but `av1.transform` has no
+  identity-transform or 1D-only (`V_*`/`H_*`) reconstruction path, so
+  `read-transform-type` throws `ex-info` (`:unsupported-tx-type`) rather
+  than silently mis-decoding if the real bitstream ever decodes one of
+  those -- this repo's test fixtures are encoded with `--enable-flip-idtx=0`
+  (an aomenc option that removes exactly `IDTX`/`V_DCT`/`H_DCT`/every
+  `FLIPADST_*` type from the encoder's RD search), so those fixtures are
+  guaranteed by construction never to hit this throw.
+- **`av1.transform/inverse-adst4!`**: the spec's Inverse ADST4 process
+  (7.13.2.6) transcribed as a flat scalar butterfly (no B/H calls, no
+  input/output permutation -- those are only needed for ADST8/ADST16,
+  spec 7.13.2.7/7.13.2.8, out of scope: this extension only reaches n=2/
+  TX_4X4). `av1.transform/inverse-transform-2d` now takes an optional
+  `tx-type` argument (default `:DCT_DCT`, so every pre-existing caller's
+  behavior is byte-for-byte unchanged) and dispatches each axis (row/
+  column) independently via `row-transform-kind`/`col-transform-kind`,
+  per the spec's #2D inverse transform process "PlaneTxType is one of ..."
+  lists: `ADST_DCT` -> row=DCT, col=ADST; `DCT_ADST` -> row=ADST,
+  col=DCT; `ADST_ADST` -> both axes ADST. (AV1's TxType naming convention
+  is "column-type_row-type", not "row_column" -- spot-checked directly
+  against the spec's own two axis lists, not assumed from the name.)
+  `flipUD`/`flipLR` (the reconstruction step's row/column mirroring for
+  `FLIPADST_*`/`*_FLIPADST` types) are never needed for this restricted
+  type set, so they aren't implemented.
+- **Real, normally-signaled `BLOCK_4X4` leaves.** `av1.tile-group/
+  decode-partition` needed NO changes at all: its existing recursive
+  `decode_partition()` implementation already handles `bsize < BLOCK_8X8 ->
+  PARTITION_NONE` (spec's base case) generically, so a real
+  `--min-partition-size=4 --max-partition-size=4` aomenc encode already
+  produces real BLOCK_4X4 leaves through the pre-existing partition-tree
+  walk (a real, normally-signaled `partition` symbol read at BLOCK_8X8,
+  not a zero-bit structural forcing). `av1.decode-block/tx-size-for` now
+  accepts both TX_32X32 and TX_4X4 (`Max_Tx_Size_Rect[BLOCK_4X4] ==
+  TX_4X4`, throws for anything else); the per-leaf luma cdf-table/
+  scan-order spec (`luma-spec-32`/`luma-spec-4x4`) is picked per-leaf
+  inside `make-decode-block-fn`'s returned callback (not once per frame),
+  since a single frame's partition tree can now mix leaf shapes across a
+  monochrome-only scope (color+BLOCK_4X4 remains out of scope, see the
+  chroma section above).
+- **New TX_4X4/luma-only CDF table slices** (`av1.tables`):
+  `Default-Txb-Skip-Cdf-4x4-Luma`/`Default-Eob-Pt-16-Cdf-Luma`/
+  `Default-Eob-Extra-Cdf-4x4-Luma`/`Default-Coeff-Base-Eob-Cdf-4x4-Luma`/
+  `Default-Coeff-Base-Cdf-4x4-Luma`/`Default-Coeff-Br-Cdf-4x4-Luma`/
+  `Default-Scan-4x4`/`Default-Intra-Tx-Type-Set1-Cdf-4x4-Dc-V-H`/
+  `Default-Intra-Tx-Type-Set2-Cdf-Uniform` -- extracted with the same
+  brace-matching parser as every pre-existing table in this namespace,
+  then spot-checked field-for-field against the raw spec markdown at both
+  the first and last row of each slice (to rule out the parser having
+  grabbed the wrong q-ctx-idx/tx-size/ptype block, the same transcription-
+  mistake risk the DCT-phase work already found and fixed 5 instances of).
+  `Coeff-Base-Ctx-Offset-32x32` is reused as-is for TX_4X4 (the reachable
+  subset, row/col in 0..3 since TX_4X4's `bwl`=2, is identical to that
+  table's first 4x4 sub-block, spot-checked against the spec's own table).
+  `dc_sign`'s cdf (`Default-Dc-Sign-Cdf-Luma`) is genuinely SHARED between
+  TX_32X32 and TX_4X4 luma leaves (the spec's `Default_Dc_Sign_Cdf` has no
+  `TX_SIZES` dimension at all, only `PLANE_TYPES` -- confirmed directly
+  against the spec table's declared shape, not assumed), so both tx sizes'
+  `luma-spec` maps intentionally share the same `:dc-sign-cdf-key`.
+- **`Default_Intra_Tx_Type_Set2_Cdf` is genuinely uniform at TX_4X4** (the
+  spec's own table has the IDENTICAL 5-symbol-equiprobable row
+  `{6554,13107,19661,26214,32768,0}` for every one of the 13 intra modes at
+  `Tx_Size_Sqr==TX_4X4` -- spot-checked programmatically across all 13
+  rows, not assumed from a single row), so a single constant
+  (`Default-Intra-Tx-Type-Set2-Cdf-Uniform`) is exact, not an
+  approximation, for the `reduced_tx_set==1` case.
+- **Real-decode validation**: two new REAL aomenc-encoded 8x8 monochrome
+  fixtures (`keyframe-8x8-adst-diag`/`keyframe-8x8-adst-quad`, see
+  test/av1/fixtures.clj docstrings), each forced into a real 2x2 grid of
+  BLOCK_4X4 leaves with a diagonal or per-quadrant step-edge content
+  design chosen because ADST responds better than DCT to content that
+  isn't symmetric about the block boundary. Both fixtures are confirmed
+  (by actually decoding and inspecting the real `TxType`, not assumed) to
+  make the real encoder choose ADST-family types -- `ADST_ADST` (2 leaves
+  in the diag fixture) and `DCT_ADST` (1 leaf in the quad fixture) --
+  and both reconstructions are bit-exact (no tolerance) against dav1d's
+  independent decode of the same bitstream. See
+  `test/av1/decode_block_test.clj`'s `adst-diag-8x8-bit-exact-test`/
+  `adst-quad-8x8-bit-exact-test`.
+- **Explicitly NOT covered by this extension**: `IDTX`/`V_DCT`/`H_DCT`/any
+  `FLIPADST_*` type (no identity-transform or flip-reconstruction path in
+  `av1.transform`); ADST8/ADST16 (TX_8X8/TX_16X16 luma leaves smaller than
+  BLOCK_32X32, which would need real `PARTITION_SPLIT`/`PARTITION_HORZ`/
+  `PARTITION_VERT` support down to those sizes plus the ADST8/16 input/
+  output permutation processes); ADST for chroma (chroma's TxType remains
+  structurally forced to DCT_DCT via `Mode_To_Txfm[UV_DC_PRED]`, unchanged
+  by this extension); color (4:2:0) frames with a BLOCK_4X4 leaf (the
+  "shared chroma block" case, see the chroma section above).
 
 ## Validation
 
