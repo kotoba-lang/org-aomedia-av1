@@ -45,6 +45,49 @@
       ;; requires -- confirm it doesn't throw for a real parsed result.
       (is (nil? (db/guard-frame-scope! parsed seq-hdr))))))
 
+(defn- seq-hdr-32x32-color []
+  (let [bytes (bw/to-bytes (bw/trailing-bits (sh/write (bw/make-writer) {:max-frame-width 32 :max-frame-height 32 :mono-chrome? false})))]
+    (sh/parse (br/make-reader bytes))))
+
+(deftest color-write-parse-roundtrip-test
+  (testing "write with :color? true (chroma encode extension,
+            ADR-2607122000 Migration step 9 continuation), paired with a
+            :mono-chrome? false sequence header -> parse reproduces
+            num_planes=3 quantization_params() (delta_q_u_dc/delta_q_u_ac
+            both real-read-as-0, delta_q_v_dc/delta_q_v_ac forced equal
+            with no extra bits since separate_uv_delta_q=0) and doesn't
+            perturb any pre-existing field av1.decode-block/
+            guard-frame-scope! requires"
+    (let [seq-hdr (seq-hdr-32x32-color)
+          bytes (bw/to-bytes (fh/write (bw/make-writer) {:base-q-idx 100 :color? true}))
+          parsed (fh/parse (br/make-reader bytes) seq-hdr)]
+      (is (= 0 (:frame-type parsed)) "KEY_FRAME")
+      (is (true? (:frame-is-intra parsed)))
+      (is (= 100 (:base-q-idx parsed)))
+      (is (= 0 (:delta-q-y-dc (:quantization-params parsed))))
+      (is (= 0 (:delta-q-u-dc (:quantization-params parsed))))
+      (is (= 0 (:delta-q-u-ac (:quantization-params parsed))))
+      (is (= 0 (:delta-q-v-dc (:quantization-params parsed))))
+      (is (= 0 (:delta-q-v-ac (:quantization-params parsed))))
+      (is (= 3 (:num-planes parsed)))
+      (is (= 0 (:mono-chrome parsed)))
+      (is (= 1 (:subsampling-x parsed)))
+      (is (= 1 (:subsampling-y parsed)))
+      (is (= :tx-mode-largest (:tx-mode parsed)))
+      (is (= 0 (:coded-lossless parsed)))
+      (is (= 0 (get-in parsed [:segmentation-params :segmentation-enabled])))
+      (is (= 0 (get-in parsed [:delta-q-params :delta-q-present])))
+      ;; This exact combination is what av1.decode-block/guard-frame-scope!
+      ;; requires for a COLOR frame -- confirm it doesn't throw.
+      (is (nil? (db/guard-frame-scope! parsed seq-hdr))))))
+
+(deftest mono-default-unchanged-test
+  (testing "omitting :color? (or passing false) reproduces byte-for-byte
+            the same output as before this chroma encode extension"
+    (let [without-key (bw/to-bytes (fh/write (bw/make-writer) {:base-q-idx 100}))
+          with-false (bw/to-bytes (fh/write (bw/make-writer) {:base-q-idx 100 :color? false}))]
+      (is (= without-key with-false)))))
+
 (deftest base-q-idx-range-test
   (testing "base-q-idx of 0 is rejected (would force CodedLossless=1, out
             of av1.decode-block's supported scope)"

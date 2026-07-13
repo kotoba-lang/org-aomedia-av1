@@ -323,9 +323,23 @@
 ;; `cfg` keys: `:max-frame-width` `:max-frame-height` (pixel dimensions,
 ;; this repo's encode scope only reaches 32x32) -- everything else in this
 ;; narrow shape is a fixed constant, not configurable (a wider `write`
-;; would need more `cfg` keys)."
+;; would need more `cfg` keys); `:mono-chrome?` (default `true`, preserving
+;; every pre-existing caller's exact output byte-for-byte) -- chroma
+;; (Cb/Cr) encode extension (ADR-2607122000 Migration step 9 continuation,
+;; mirroring av1.decode-block's own chroma-decode extension): when
+;; `false`, writes the `mono_chrome=0`/4:2:0 color_config() path instead
+;; (still seq_profile=0, 8-bit, no color_description) -- per
+;; `parse-color-config`'s seq_profile==0/mono_chrome==0 branch, this adds
+;; exactly THREE bits beyond the mono_chrome=1 path: `mono_chrome` itself
+;; flips from a hardcoded 1 to a real 0 (subsampling_x/subsampling_y are
+;; STILL zero-bit-forced to 1/1 by seq_profile==0, same as the mono path --
+;; not re-read), then (since subsampling_x==1 && subsampling_y==1)
+;; `chroma_sample_position` f(2) = CSP_UNKNOWN and `separate_uv_delta_q`
+;; f(1) = 0 are read for real, in that exact position (immediately after
+;; `color_range`, before `film_grain_params_present`) -- spot-checked
+;; against `parse-color-config`'s own control flow, not assumed."
 (defn write
-  [writer {:keys [max-frame-width max-frame-height]}]
+  [writer {:keys [max-frame-width max-frame-height mono-chrome?] :or {mono-chrome? true}}]
   (let [;; FloorLog2(maxFrameWidthMinus1) per spec's own encoder guidance
         ;; is the minimal `frame_width_bits_minus_1` -- for this repo's
         ;; 32x32 scope, max-frame-width=32 -> max-frame-width-minus-1=31 ->
@@ -358,12 +372,25 @@
         (bw/f 1 0)                                  ;; enable_restoration = 0
         ;; -- color_config(), seq_profile=0 --
         (bw/f 1 0)                                  ;; high_bitdepth = 0 (8-bit)
-        (bw/f 1 1)                                  ;; mono_chrome = 1
+        (bw/f 1 (if mono-chrome? 1 0))               ;; mono_chrome
         (bw/f 1 0)                                  ;; color_description_present_flag = 0
         ;; mono_chrome==1 branch: only color_range is read (subsampling_x/y
         ;; forced 1/1, chroma_sample_position forced CSP_UNKNOWN,
         ;; separate_uv_delta_q forced 0 -- all zero-bit, see `parse-color-
-        ;; config`'s mono_chrome==1 branch).
+        ;; config`'s mono_chrome==1 branch). mono_chrome==0/seq_profile==0
+        ;; branch: color_range is the SAME single bit at the SAME position
+        ;; (identity_srgb? is always false here since
+        ;; color_description_present_flag=0 forces CP_UNSPECIFIED, which
+        ;; != CP_BT_709) -- subsampling_x/y are still zero-bit-forced to
+        ;; 1/1 by seq_profile==0 (`parse-color-config`'s
+        ;; `(= seq-profile 0) [cr 1 1 r']` branch), so chroma extension adds
+        ;; no bits here either.
         (bw/f 1 0)                                  ;; color_range = 0
+        (as-> w w
+          (if mono-chrome?
+            w
+            (-> w
+                (bw/f 2 0)                           ;; chroma_sample_position = CSP_UNKNOWN
+                (bw/f 1 0))))                         ;; separate_uv_delta_q = 0
         (bw/f 1 0)                                  ;; film_grain_params_present = 0
         )))

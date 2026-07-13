@@ -3,21 +3,23 @@
    decode-block, for THIS repo's narrow single-keyframe encode scope only
    (2026-07 AV1 encode task, ADR-2607122000 Migration step 9 continuation):
    a single BLOCK_32X32/PARTITION_NONE leaf covering the whole (32x32)
-   frame, DC_PRED (luma), TX_32X32/DCT_DCT, luma only (monochrome) --
+   frame, DC_PRED (luma) + UV_DC_PRED (chroma, per the chroma encode
+   extension below), TX_32X32/DCT_DCT (luma) + TX_16X16/DCT_DCT (chroma) --
    scoped even narrower than av1.decode-block's own scope (which also
-   supports V_PRED/H_PRED/PAETH_PRED/SMOOTH_PRED, chroma, ADST/TX_4X4, and
-   a zero-motion inter-frame extension -- none of which this first encode
-   pass produces).
+   supports V_PRED/H_PRED/PAETH_PRED/SMOOTH_PRED, ADST/TX_4X4, and a
+   zero-motion inter-frame extension -- none of which this encode pass
+   produces).
 
    Every context-derivation helper this needs (get-coeff-base-ctx/
-   get-coeff-br-ctx/get-dc-sign-ctx/record-above!/record-left!) is REUSED
-   directly from av1.decode-block (made public there for exactly this
-   reason -- a visibility-only change, no logic change) rather than
-   re-transcribed here: those functions are pure (cdf-context math over an
-   already-known coefficient/state map, no bitstream interaction), so
-   reusing them structurally GUARANTEES this encoder's context derivation
-   can never independently drift from the decoder's -- a real risk if the
-   same ~40-line ctx formula were hand-copied a second time.
+   get-coeff-br-ctx/get-dc-sign-ctx/get-txb-skip-ctx-chroma/record-above!/
+   record-left!) is REUSED directly from av1.decode-block (made public
+   there for exactly this reason -- a visibility-only change, no logic
+   change) rather than re-transcribed here: those functions are pure
+   (cdf-context math over an already-known coefficient/state map, no
+   bitstream interaction), so reusing them structurally GUARANTEES this
+   encoder's context derivation can never independently drift from the
+   decoder's -- a real risk if the same ~40-line ctx formula were
+   hand-copied a second time.
 
    `write-coeffs` mirrors av1.decode-block/read-coeffs's own three passes
    (all_zero -> transform_type -> eob -> level pass (c=eob-1 downto 0) ->
@@ -26,7 +28,18 @@
    av1.transform/forward-transform-2d + quantize) -- so every ctx this
    encoder computes mid-write is computed from exactly the same
    partially-filled `quant` state read-coeffs would have decoded UP TO
-   that point, guaranteeing the two sides can't desync on context."
+   that point, guaranteeing the two sides can't desync on context.
+   `write-coeffs` was ALREADY fully generalized over plane/tx-size via its
+   `spec` argument (the SAME map shape av1.decode-block's `luma-spec-base`/
+   `chroma-spec-base`/`u-spec`/`v-spec` use) before this chroma encode
+   extension -- since chroma's TxType is DCT_DCT with a structural
+   zero-bit guarantee for this scope (no `transform_type()` write needed
+   for plane>0, exactly mirroring av1.decode-block/read-coeffs' own
+   plane==0-only `read-transform-type` call), `write-coeffs` needed
+   ZERO changes to serve chroma (TX_16X16, plane 1/2) in addition to luma
+   (TX_32X32, plane 0) -- av1.encode's chroma extension only needed a new
+   `write-uv-mode` (below) and new chroma `spec` maps at the call site (see
+   av1.encode's own chroma section)."
   (:require [av1.bool-encoder :as be]
             [av1.tables :as tables]
             [av1.decode-block :as db]))
@@ -93,6 +106,28 @@
       (throw (ex-info "av1.encode-block: out of scope: intra_frame_y_mode ctx != (0,0)"
                        {:reason :unsupported-y-mode-ctx :ctx ctx})))
     (write-cdf-symbol state :y-mode-cdf [0 0] tables/Default-Intra-Frame-Y-Mode-Cdf-0-0 y-mode)))
+
+;; ---------------------------------------------------------------------
+;; uv_mode's encode-side inverse -- chroma (Cb/Cr) encode extension
+;; (ADR-2607122000 Migration step 9 continuation, mirroring
+;; av1.decode-block's own chroma-decode extension). See av1.decode-block/
+;; read-uv-mode's docstring for the ctx derivation (the block's own already-
+;; decoded YMode, NOT a neighbor lookup) and the restriction to
+;; {DC_PRED,V_PRED,H_PRED} y-modes (chroma+PAETH_PRED/SMOOTH_PRED luma has
+;; no transcribed TileUVModeCflAllowedCdf row, out of scope for both encode
+;; and decode). `uv-mode` must be UV_DC_PRED for this encode pass's scope
+;; (throws otherwise, matching this namespace's `write-y-mode`'s own
+;; DC_PRED-only restriction)."
+
+(defn write-uv-mode [state y-mode uv-mode]
+  (when (not (contains? #{db/DC_PRED db/V_PRED db/H_PRED} y-mode))
+    (throw (ex-info "av1.encode-block: out of scope: uv_mode ctx (YMode) not in {DC_PRED,V_PRED,H_PRED}"
+                     {:reason :unsupported-y-mode-for-uv-mode-ctx :y-mode y-mode})))
+  (when (not= uv-mode db/UV_DC_PRED)
+    (throw (ex-info "av1.encode-block: out of scope: only UV_DC_PRED is supported by this encode pass"
+                     {:reason :unsupported-uv-mode :uv-mode uv-mode})))
+  (write-cdf-symbol state :uv-mode-cdf y-mode
+                     (nth tables/Default-Uv-Mode-Cfl-Allowed-Cdf-Dc-V-H y-mode) uv-mode))
 
 ;; ---------------------------------------------------------------------
 ;; eob's encode-side inverse -- see av1.decode-block/read-eob's docstring

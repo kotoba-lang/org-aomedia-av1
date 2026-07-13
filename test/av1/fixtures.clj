@@ -1000,3 +1000,135 @@
   "dav1d's raw 8-bit gray decode of `encode-keyframe-32x32-busy-bytes`."
   []
   (load-resource "av1/fixtures/encode-keyframe-32x32-busy.dav1d.yuv"))
+
+;; =======================================================================
+;; ENCODE-side CHROMA (Cb/Cr) fixtures (chroma encode extension,
+;; ADR-2607122000 Migration step 9 continuation) -- same status as the
+;; four monochrome encode fixtures above: THIS REPO'S OWN ENCODER output
+;; (`av1.encode/encode-keyframe` with `:cb`/`:cr` supplied, a
+;; `mono_chrome=0`/4:2:0/`num_planes=3` color keyframe), generated once
+;; (2026-07-13) and checked in the same way. The paired `.dav1d.yuv` files
+;; are REAL `dav1d`'s (1.5.3) independent decode of these self-produced
+;; streams (`dav1d -i <name>.obu -o <name>.dav1d.yuv`), each 1536 bytes
+;; (1024 Y + 256 U + 256 V, row-major each plane) -- additionally
+;; cross-checked against a SECOND independent decoder, `aomdec` (libaom
+;; 3.14.1, `aomdec --i420 -o ... <name>.obu`), whose Y+U+V output was
+;; confirmed byte-identical to the dav1d output for all three fixtures
+;; before checking these in (not itself re-checked at test time, matching
+;; this repo's hermetic-test-suite practice, same as the monochrome encode
+;; fixtures' aomdec cross-check above).
+
+(defn encode-keyframe-32x32-color-flat-bytes
+  "This repo's own encoder output for a FLAT 32x32 4:2:0 color keyframe
+   (Y=128, Cb=128, Cr=128 on every sample -- every plane's DC_PRED/
+   UV_DC_PRED-with-no-neighbors predicted value exactly) -- residual is
+   all-zero on EVERY plane, so this exercises the `skip=1` path for a
+   color frame (a single per-block skip flag covering luma AND chroma at
+   once, see av1.encode/encode-tile-payload's docstring): `uv_mode` IS
+   still written for real (a real symbol, not zero-bit, regardless of
+   skip), but NO `coeffs()` call happens for any plane. Generated via:
+
+   ```clojure
+   (av1.encode/encode-keyframe (vec (repeat 1024 128)) 100
+     {:skip? true :cb (vec (repeat 256 128)) :cr (vec (repeat 256 128))})
+   ```
+
+   Real-decode validation: bit-exact (no tolerance, all three planes)
+   against both `dav1d` and `aomdec`'s independent decodes."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-color-flat.obu"))
+
+(defn encode-keyframe-32x32-color-flat-golden-yuv
+  "dav1d's raw 8-bit I420 decode of
+   `encode-keyframe-32x32-color-flat-bytes` (1536 bytes: 1024 Y + 256 U +
+   256 V, row-major each plane)."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-color-flat.dav1d.yuv"))
+
+(defn encode-keyframe-32x32-color-gradient-bytes
+  "This repo's own encoder output for a smooth low-frequency 32x32 4:2:0
+   color keyframe -- luma is the SAME single-cycle horizontal sinusoid as
+   `encode-keyframe-32x32-gradient-bytes` (`128 + 20*sin(2*pi*x/32)`,
+   base_q_idx=60); Cb is a 16x16 linear ramp across x (`100 + 24*x/15`);
+   Cr is a 16x16 linear ramp across y (`160 + 18*y/15`) -- three
+   genuinely different profiles per plane (same rationale as the
+   DECODE-side `keyframe-32x32-color-bytes` fixture's design, see its
+   docstring), so a bug that mixed up plane buffers/deltas/cdf tables
+   would produce a wrong (not merely coincidentally-right)
+   reconstruction. Exercises a real (non-skip) multi-coefficient
+   `coeffs()` call on U and V (via `av1.encode-block/write-coeffs`'s
+   chroma reuse, see its namespace docstring) for the FIRST time (the
+   flat fixture above only ever exercises chroma's `uv_mode` write, never
+   `coeffs()`). Generated via:
+
+   ```clojure
+   (av1.encode/encode-keyframe
+     (vec (for [_y (range 32) x (range 32)]
+            (int (+ 128 (* 20 (Math/sin (* 2 Math/PI (/ x 32.0))))))))
+     60
+     {:skip? false
+      :cb (vec (for [_y (range 16) x (range 16)] (int (+ 100 (* 24 (/ x 15.0))))))
+      :cr (vec (for [y (range 16) _x (range 16)] (int (+ 160 (* 18 (/ y 15.0))))))})
+   ```
+
+   Real-decode validation: this repo's own reconstruction is bit-exact (no
+   tolerance, all three planes) against both `dav1d` and `aomdec`'s
+   independent decodes of this same bitstream (NOT bit-exact against the
+   original floating-point-designed target on Cb/Cr -- real, expected
+   lossy transform-coding error, the same normal kind luma's own gradient
+   fixture has, not a bug)."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-color-gradient.obu"))
+
+(defn encode-keyframe-32x32-color-gradient-golden-yuv
+  "dav1d's raw 8-bit I420 decode of
+   `encode-keyframe-32x32-color-gradient-bytes`."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-color-gradient.dav1d.yuv"))
+
+(defn encode-keyframe-32x32-color-busy-bytes
+  "This repo's own encoder output for a busier, higher-frequency 32x32
+   4:2:0 color keyframe at a FINE quantizer (`base_q_idx=20`, same
+   quantizer as `encode-keyframe-32x32-busy-bytes`) -- luma is the SAME
+   busy multi-frequency pattern as that fixture; Cb/Cr are each their OWN
+   different busy sinusoidal combinations (`Cb = 100 + 50*sin(1.1x) +
+   30*cos(0.5y)`, `Cr = 160 + 45*cos(0.8x) + 35*sin(1.3y)`, both clamped
+   to [0,255]) chosen specifically so several of EACH chroma plane's
+   quantized coefficients exceed magnitude 14 (confirmed before checking
+   this fixture in: U has 30 nonzero coefficients, 12 with |value| > 14;
+   V has 29 nonzero, 8 with |value| > 14) -- forcing this fixture to
+   exercise `av1.encode-block/write-golomb`'s escape code for CHROMA
+   coefficients specifically (the monochrome busy fixture above already
+   validated `write-golomb` for luma; this is the first regression
+   fixture for the SAME code path reached via the chroma `spec`/cdf-key
+   family instead of luma's). Generated via:
+
+   ```clojure
+   (av1.encode/encode-keyframe
+     (vec (for [y (range 32) x (range 32)]
+            (max 0 (min 255 (int (+ 128 (* 60 (Math/sin (* 0.9 x)))
+                                    (* 40 (Math/cos (* 0.7 y)))
+                                    (* 15 (Math/sin (* 3.1 x)))))))))
+     20
+     {:skip? false
+      :cb (vec (for [y (range 16) x (range 16)]
+                 (max 0 (min 255 (int (+ 100 (* 50 (Math/sin (* 1.1 x)))
+                                         (* 30 (Math/cos (* 0.5 y)))))))))
+      :cr (vec (for [y (range 16) x (range 16)]
+                 (max 0 (min 255 (int (+ 160 (* 45 (Math/cos (* 0.8 x)))
+                                         (* 35 (Math/sin (* 1.3 y)))))))))})
+   ```
+
+   Real-decode validation: this repo's own reconstruction is bit-exact (no
+   tolerance, all three planes) against both `dav1d` and `aomdec`'s
+   independent decodes of this same bitstream -- the strongest available
+   confirmation that chroma's `write-golomb` path is correct, not merely
+   that it doesn't crash."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-color-busy.obu"))
+
+(defn encode-keyframe-32x32-color-busy-golden-yuv
+  "dav1d's raw 8-bit I420 decode of
+   `encode-keyframe-32x32-color-busy-bytes`."
+  []
+  (load-resource "av1/fixtures/encode-keyframe-32x32-color-busy.dav1d.yuv"))

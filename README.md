@@ -1256,19 +1256,20 @@ assuming correctness from symmetry with the decode side.
 
 **Scope**, deliberately narrowed to this repo's very first pixel-
 reconstruction decode milestone's shape (single BLOCK_32X32 leaf, DC_PRED,
-TX_32X32/DCT_DCT, luma only) -- not the full range of modes/sizes the
-decode side has since grown to support (V_PRED/H_PRED/PAETH/SMOOTH/chroma/
-ADST/inter):
+TX_32X32/DCT_DCT, luma only -- **now extended to also cover chroma
+(Cb/Cr), see the "Chroma (Cb/Cr) encode extension" section below**) --
+not the full range of modes/sizes the decode side has since grown to
+support (V_PRED/H_PRED/PAETH/SMOOTH/ADST/inter):
 
 | ns | role |
 |---|---|
 | `av1.bitwriter` | MSB-first bit writer -- the exact structural inverse of `av1.bitreader`'s descriptors (`f`/`uvlc`/`le`/`leb128`/`su`/`ns`/`byte-alignment`), plus `trailing-bits` (spec 5.3.4's `trailing_one_bit`+zero-pad, distinct from plain `byte-alignment` -- see below). Verified by round-tripping every descriptor back through `av1.bitreader` across a wide value range (`test/av1/bitwriter_test.clj`) |
 | `av1.bool-encoder` | the AV1 Symbol ENCODER -- ported from libaom's real `od_ec_enc_*` family (`aom_dsp/entenc.c`/`entenc.h`, AOMediaCodec/aom master), the actual encode-side counterpart of the daala-derived range coder `av1.bool-decoder` implements the decode side of (there is no spec text for this at all). CDF adaptation is shared with `av1.bool-decoder` via a factored-out `av1.bool-decoder/adapt-cdf` public fn, so both sides are structurally guaranteed to adapt identically. Implementation simplification: never flushes `low`/`cnt` mid-stream (correct but unbounded-growing, safe for this repo's tiny single-keyframe scope) -- **JVM Clojure only** (`.clj`, not `.cljc`: needs true `bigint` arithmetic, which does not exist in ClojureScript's numeric tower, confirmed via clj-kondo -- see its namespace docstring for the full portability note and what a cljs port would need). Verified against `av1.bool-decoder` across thousands of mixed-cdf symbol round-trips (`test/av1/bool_encoder_test.clj`) |
-| `av1.transform` (additions) | `forward-transform-2d`/`quantize` -- the exact forward inverse of the pre-existing `inverse-transform-2d`/`dequantize`, derived by NUMERICALLY PROBING the real inverse transform (not re-derived from an external forward-DCT source) to discover its exact orthonormal-basis scale factor, then confirmed point-by-point against multi-coefficient probes before being relied on (see `forward-transform-2d`'s docstring for the full derivation). Verified: exact round-trip for flat/low-frequency residuals, small bounded lossy error for busier content at a fine quantizer (`test/av1/transform_encode_test.clj`) |
-| `av1.encode-block` | `write-coeffs`/`write-skip`/`write-y-mode` -- the encode-side inverse of `av1.decode-block`'s `read-coeffs`/`read-skip`/`read-y-mode`, for this section's narrow scope only. Reuses `av1.decode-block`'s own context-derivation helpers directly (`get-coeff-base-ctx`/`get-coeff-br-ctx`/`get-dc-sign-ctx`/`record-above!`/`record-left!`, made public there for exactly this reason -- a visibility-only change, no decode-side logic change) rather than re-transcribing them, so context derivation cannot independently drift between encode and decode. Implements the full `coeff_base`/`coeff_base_eob`/`coeff_br` continuation AND the golomb escape code (`write-golomb`) for real -- not just the common case (see the `busy` fixture below) |
-| `av1.sequence-header`/`av1.frame-header` (additions) | `write` -- narrow encode-side inverses of `parse`, covering exactly the field combination this scope needs (`reduced_still_picture_header=1`, monochrome, single tile, `TX_MODE_LARGEST`, no segmentation/delta-q/delta-lf/CDEF/loop-restoration/film-grain/superres) -- NOT a full general inverse of every `parse` branch. Verified by round-tripping back through `parse` itself (`test/av1/sequence_header_encode_test.clj`/`test/av1/frame_header_encode_test.clj`) |
+| `av1.transform` (additions) | `forward-transform-2d`/`quantize` -- the exact forward inverse of the pre-existing `inverse-transform-2d`/`dequantize`, derived by NUMERICALLY PROBING the real inverse transform (not re-derived from an external forward-DCT source) to discover its exact orthonormal-basis scale factor, then confirmed point-by-point against multi-coefficient probes before being relied on (see `forward-transform-2d`'s docstring for the full derivation). Verified: exact round-trip for flat/low-frequency residuals, small bounded lossy error for busier content at a fine quantizer (`test/av1/transform_encode_test.clj`). Chroma encode extension (see below): the final scale is now a size-dependent `forward-scale` closed form (`2^(7-max(log2,4))`) rather than a hardcoded `TX_32X32`-only constant -- a real bug (factor-of-2 error for `TX_16X16`) this extension's own validation caught and fixed |
+| `av1.encode-block` | `write-coeffs`/`write-skip`/`write-y-mode` -- the encode-side inverse of `av1.decode-block`'s `read-coeffs`/`read-skip`/`read-y-mode`, for this section's narrow scope only. Reuses `av1.decode-block`'s own context-derivation helpers directly (`get-coeff-base-ctx`/`get-coeff-br-ctx`/`get-dc-sign-ctx`/`get-txb-skip-ctx-chroma`/`record-above!`/`record-left!`, made public there for exactly this reason -- a visibility-only change, no decode-side logic change) rather than re-transcribing them, so context derivation cannot independently drift between encode and decode. Implements the full `coeff_base`/`coeff_base_eob`/`coeff_br` continuation AND the golomb escape code (`write-golomb`) for real -- not just the common case (see the `busy` fixture below). Chroma encode extension (see below): also `write-uv-mode` -- `write-coeffs` itself needed ZERO changes to serve chroma (already generalized over plane/tx-size via its `spec` argument) |
+| `av1.sequence-header`/`av1.frame-header` (additions) | `write` -- narrow encode-side inverses of `parse`, covering exactly the field combination this scope needs (`reduced_still_picture_header=1`, monochrome, single tile, `TX_MODE_LARGEST`, no segmentation/delta-q/delta-lf/CDEF/loop-restoration/film-grain/superres) -- NOT a full general inverse of every `parse` branch. Verified by round-tripping back through `parse` itself (`test/av1/sequence_header_encode_test.clj`/`test/av1/frame_header_encode_test.clj`). Chroma encode extension (see below): `av1.sequence-header/write` gained optional `:mono-chrome?` (default `true`), `av1.frame-header/write` gained optional `:color?` (default `false`) -- both byte-for-byte unchanged for every pre-existing caller |
 | `av1.obu` (addition) | `write-obu`/`write-obu-header` -- OBU framing (header + leb128 `obu_size` + payload), low-overhead format only, no extension header |
-| `av1.encode` | top-level orchestration (`encode-keyframe`): pixels -\> DC_PRED residual -\> forward-transform-2d/quantize -\> `av1.encode-block`/bool-encoder -\> `av1.frame-header`/`av1.sequence-header` `write` -\> OBU framing -\> a complete, standalone, legal AV1 bitstream |
+| `av1.encode` | top-level orchestration (`encode-keyframe`): pixels -\> DC_PRED residual -\> forward-transform-2d/quantize -\> `av1.encode-block`/bool-encoder -\> `av1.frame-header`/`av1.sequence-header` `write` -\> OBU framing -\> a complete, standalone, legal AV1 bitstream. Chroma encode extension (see below): optional `:cb`/`:cr` args produce a 4:2:0 color keyframe instead |
 
 **A real, spec-conformance bug this task's own validation caught** (not
 assumed away): the first working version of this encoder produced a
@@ -1333,10 +1334,115 @@ Fixture-by-fixture:
 
 **Not yet covered by this encode pass** (mirrors this section's own
 narrow scope, see above): any partition shape other than a single
-whole-frame `BLOCK_32X32` leaf, any intra mode other than `DC_PRED`, any
-transform size other than `TX_32X32`, chroma planes, inter frames, and a
-`.cljc`/ClojureScript-portable symbol encoder (`av1.bool-encoder` is JVM
-Clojure only, see its namespace docstring).
+whole-frame `BLOCK_32X32` leaf, any intra mode other than `DC_PRED`
+(luma)/`UV_DC_PRED` (chroma, per the chroma encode extension below), any
+transform size other than `TX_32X32` (luma)/`TX_16X16` (chroma), inter
+frames, and a `.cljc`/ClojureScript-portable symbol encoder
+(`av1.bool-encoder` is JVM Clojure only, see its namespace docstring).
+
+### Chroma (Cb/Cr) encode extension (ADR-2607122000 Migration step 9 continuation)
+
+The luma-only encode pass above has been extended to also encode the U
+(Cb) and V (Cr) planes, for 4:2:0 content, by inverting av1.decode-block's
+already-validated chroma-decode extension the same way this task's
+original luma pass inverted its own luma-only decode milestone -- pass
+`:cb`/`:cr` (each a flat row-major 16x16 vector, the 4:2:0 subsample of
+the 32x32 luma frame) to `av1.encode/encode-keyframe` to produce a
+`mono_chrome=0`/`num_planes=3` color keyframe instead of the original
+monochrome-only shape.
+
+- **Scope is exactly the luma pass's shape, mirrored per plane**: one
+  `BLOCK_32X32` leaf (subsamples 4:2:0 to exactly one `BLOCK_16X16`
+  chroma block), `UV_DC_PRED` (chroma DC prediction with no available
+  neighbors -- the SAME `128` no-neighbors constant as luma's `DC_PRED`,
+  since `av1.intra-pred/dc-predict` is plane-agnostic, see its namespace
+  docstring), `TX_16X16`/`DCT_DCT` (chroma's TxType is `DCT_DCT` with a
+  structural zero-bit guarantee for `UV_DC_PRED`, exactly mirroring
+  luma's `TX_32X32` guarantee -- see `av1.decode-block`'s chroma-decode
+  section above), and zero chroma quantizer delta
+  (`delta_q_u_dc=delta_q_u_ac=0`, so chroma shares luma's `base_q_idx`
+  directly -- the simplest legal choice, not a scope restriction).
+- **`uv_mode` IS a real symbol write** (`av1.encode-block/write-uv-mode`,
+  the encode-side inverse of `av1.decode-block/read-uv-mode`) -- real for
+  every color frame regardless of the decoded/encoded value or the
+  block's skip flag (per spec, `uv_mode` is read right after
+  `intra_angle_info_y()`, unconditionally on skip).
+- **`av1.encode-block/write-coeffs` needed ZERO changes** to serve chroma
+  in addition to luma: it was already fully generalized over plane/
+  tx-size via its `spec` argument (the same map shape
+  `av1.decode-block`'s `luma-spec-base`/`chroma-spec-base`/`u-spec`/
+  `v-spec` use), and chroma's `TxType` is `DCT_DCT` with no
+  `transform_type()` write needed for plane>0 -- exactly mirroring
+  `av1.decode-block/read-coeffs`'s own plane==0-only `read-transform-type`
+  call. `av1.decode-block/get-txb-skip-ctx-chroma` (chroma's plane>0
+  `txb_skip` context derivation) was made public (visibility-only
+  change) for the same reuse-not-re-derive reason
+  `get-coeff-base-ctx`/`get-coeff-br-ctx`/`get-dc-sign-ctx`/
+  `record-above!`/`record-left!` already were.
+- **A real, size-generalization bug this task's own validation caught**
+  (not assumed away): `av1.transform/forward-transform-2d`'s final scale
+  had been hardcoded to a constant `4.0`, derived and validated ONLY for
+  `TX_32X32` (log2=5) -- a real regression test for this extension's new
+  `TX_16X16` (log2=4) size immediately failed with a factor-of-2 error
+  (a flat 16x16 residual at value 20 round-tripped to exactly 10). Fixed
+  by re-probing `av1.transform/inverse-transform-2d` (the SAME
+  numerical-probing methodology the original forward-transform derivation
+  used, see that namespace's docstring) across every square transform
+  size this repo's tables span, discovering the closed-form
+  `forward-scale(log2) = 2^(7 - max(log2,4))` -- which reduces to the
+  pre-existing `4.0` EXACTLY for `log2=5`, so every pre-existing
+  `TX_32X32` caller's output is byte-for-byte unchanged, while correctly
+  giving `8.0` for `TX_16X16`. Confirmed for both the DC and a genuine AC
+  (non-DC) frequency, not merely the flat-DC case. See
+  `av1.transform`'s namespace docstring's SIZE GENERALIZATION note and
+  `test/av1/transform_encode_test.clj`'s TX_16X16 regression tests.
+- **`av1.sequence-header/write`** gained an optional `:mono-chrome?`
+  (default `true`, byte-for-byte unchanged for every pre-existing caller)
+  -- when `false`, writes the real `mono_chrome=0`/4:2:0 `color_config()`
+  path (still `seq_profile=0`, 8-bit, no `color_description`): exactly
+  THREE extra bits versus the monochrome path (`chroma_sample_position`
+  f(2) + `separate_uv_delta_q` f(1), both 0 -- `subsampling_x`/
+  `subsampling_y` remain zero-bit-forced to 1/1 by `seq_profile==0`, same
+  as the mono path).
+- **`av1.frame-header/write`** gained an optional `:color?` (default
+  `false`, byte-for-byte unchanged) -- when `true`, `quantization_params()`
+  writes two extra real bits (`delta_q_u_dc`/`delta_q_u_ac`, both
+  `delta_coded=0`) per the spec's `num_planes>1` branch; since
+  `separate_uv_delta_q=0` (from the paired sequence header), V's deltas
+  are forced equal to U's with no further bits, so chroma's DC/AC
+  quantizer is uniformly `base_q_idx`.
+
+**Validation**: three fixtures
+(`resources/av1/fixtures/encode-keyframe-32x32-color-{flat,gradient,
+busy}.obu`), all THIS REPO'S OWN encoder output (`av1.encode/
+encode-keyframe` with `:cb`/`:cr` supplied -- see `test/av1/fixtures.clj`
+docstrings for the exact invocation behind each one), validated against
+the SAME two independent real decoders the monochrome encode fixtures
+use:
+
+- `dav1d` (1.5.3): succeeds (no error) for all three, and this repo's own
+  decode of each fixture is **bit-exact (no tolerance, all three planes)**
+  against dav1d's independent decode (`test/av1/encode_test.clj`'s
+  `dav1d-bit-exact-color-*-test`s).
+- `aomdec` (libaom 3.14.1, `--i420`): also succeeds for all three, with
+  its Y+U+V output byte-identical to dav1d's.
+
+Fixture-by-fixture: `encode-keyframe-32x32-color-flat` (Y=Cb=Cr=128,
+`skip=1` on every plane -- `uv_mode` is still a real write even though no
+plane has residual); `encode-keyframe-32x32-color-gradient` (luma's
+existing sinusoid + linear Cb/Cr ramps, `base_q_idx=60` -- a genuine
+multi-coefficient AC residual on U and V, exercised via
+`av1.encode-block/write-coeffs`'s chroma reuse for the first time);
+`encode-keyframe-32x32-color-busy` (busier content on all three planes,
+`base_q_idx=20` chosen so several of EACH chroma plane's quantized
+coefficients exceed magnitude 14 -- U: 12 of 30 nonzero, V: 8 of 29
+nonzero -- forcing `write-golomb`'s escape code to run for chroma
+specifically, not just luma).
+
+**Not yet covered by this extension**: any intra mode other than
+`UV_DC_PRED`, 4:2:2/4:4:4 chroma subsampling, a nonzero chroma quantizer
+delta, and the same partition-shape/inter-frame/`.cljc`-portability
+restrictions the luma-only encode pass above already documents.
 
 ### Usage
 
@@ -1348,6 +1454,13 @@ Clojure only, see its namespace docstring).
 ;; => a complete, standalone AV1 OBU stream (byte vector) --
 ;;    decodable by this repo's own av1.decode-block, real dav1d,
 ;;    real aomdec, `ffmpeg -f obu`, etc.
+
+;; Chroma (Cb/Cr) encode extension: pass :cb/:cr (each a flat 16x16
+;; vector, the 4:2:0 subsample of `pixels`) for a color keyframe.
+(def cb (vec (repeat (* 16 16) 128)))
+(def cr (vec (repeat (* 16 16) 128)))
+(def color-obu-bytes (enc/encode-keyframe pixels 100 {:skip? true :cb cb :cr cr}))
+;; => a complete mono_chrome=0/4:2:0 AV1 OBU stream.
 ```
 
 ## Test
