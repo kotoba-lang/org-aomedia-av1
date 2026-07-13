@@ -41,6 +41,32 @@
         (is (= w (:max-frame-width parsed)) (str "width mismatch for " w "x" h))
         (is (= h (:max-frame-height parsed)) (str "height mismatch for " w "x" h))))))
 
+(deftest color-write-parse-roundtrip-test
+  (testing "write with :mono-chrome? false (chroma encode extension,
+            ADR-2607122000 Migration step 9 continuation) -> parse
+            reproduces a real mono_chrome=0/4:2:0 color_config(), and
+            every pre-existing field this repo's decode side
+            (av1.decode-block/guard-frame-scope!) requires is unaffected"
+    (let [bytes (bw/to-bytes (bw/trailing-bits (sh/write (bw/make-writer) {:max-frame-width 32 :max-frame-height 32 :mono-chrome? false})))
+          parsed (sh/parse (br/make-reader bytes))]
+      (is (= 0 (:seq-profile parsed)))
+      (is (= 1 (:reduced-still-picture-header parsed)))
+      (is (= 32 (:max-frame-width parsed)))
+      (is (= 32 (:max-frame-height parsed)))
+      (is (= 0 (:mono-chrome parsed)))
+      (is (= 3 (:num-planes parsed)))
+      (is (= 1 (:subsampling-x parsed)))
+      (is (= 1 (:subsampling-y parsed)))
+      (is (= 0 (:separate-uv-delta-q parsed)))
+      (is (= 0 (:film-grain-params-present parsed))))))
+
+(deftest mono-chrome-default-unchanged-test
+  (testing "omitting :mono-chrome? (or passing true) reproduces byte-for-
+            byte the same output as before this chroma encode extension"
+    (let [without-key (bw/to-bytes (sh/write (bw/make-writer) {:max-frame-width 32 :max-frame-height 32}))
+          with-true (bw/to-bytes (sh/write (bw/make-writer) {:max-frame-width 32 :max-frame-height 32 :mono-chrome? true}))]
+      (is (= without-key with-true)))))
+
 (deftest trailing-bits-required-for-real-decoder-interop-test
   (testing "the sequence header payload is not already byte-aligned after
             its own real syntax (39 bits for 32x32) -- confirming

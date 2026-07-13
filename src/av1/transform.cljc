@@ -363,10 +363,10 @@
 ;; an identity map (up to integer/quantization rounding, which is expected
 ;; and normal for any DCT-based codec, not a bug).
 ;;
-;; DERIVATION (n=5/TX_32X32, the only size this repo's encode scope uses):
-;; probing `inverse-transform-2d` with a single nonzero Dequant[k][l]=X
-;; (all others 0) and reading back the resulting (should-be-constant/
-;; single-basis-shaped) residual showed EXACTLY (not approximately):
+;; DERIVATION (n=5/TX_32X32, this task's ORIGINAL encode scope): probing
+;; `inverse-transform-2d` with a single nonzero Dequant[k][l]=X (all others
+;; 0) and reading back the resulting (should-be-constant/single-basis-
+;; shaped) residual showed EXACTLY (not approximately):
 ;;   residual[i][j] = round( X * G * alpha(k) * alpha(l)
 ;;                           * cos(pi/32*(i+0.5)*k) * cos(pi/32*(j+0.5)*l) )
 ;; with alpha(0) = sqrt(1/32), alpha(k>0) = sqrt(2/32) (the standard
@@ -379,9 +379,43 @@
 ;; task's research notes for the full probe transcript). Since this is an
 ;; ORTHONORMAL basis (forward and inverse share the same normalization,
 ;; unlike the textbook \"1/N, 2/N\" DCT-II/III pair), the exact forward
-;; inverse of `inverse-transform-2d`'s `residual = (1/4) * IDCT2D(Dequant)`
-;; is `Dequant = 4 * DCT2D(residual)` -- i.e. the SAME basis functions,
+;; inverse of `inverse-transform-2d`'s `residual = G * IDCT2D(Dequant)` is
+;; `Dequant = (1/G) * DCT2D(residual)` -- i.e. the SAME basis functions,
 ;; analysis instead of synthesis, times 1/G instead of G.
+;;
+;; SIZE GENERALIZATION (chroma encode extension, ADR-2607122000 Migration
+;; step 9 continuation -- a real bug this extension's OWN validation
+;; caught, not assumed away): the n=32-only derivation above was WRONG to
+;; generalize as a size-INDEPENDENT final scale of 4.0 -- re-probing
+;; `inverse-transform-2d` the SAME way (single nonzero Dequant[k][l]=8192,
+;; all else 0) at every square size this repo's transform sizes span
+;; (log2 = 2/3/4/5/6, i.e. TX_4X4/TX_8X8/TX_16X16/TX_32X32/TX_64X64) showed
+;; the DC-only (k=l=0) response is NOT size-independent: residual ==
+;; 256/128/64/64/64 for log2=2/3/4/5/6 respectively (this extension's own
+;; real encode/decode round-trip test for TX_16X16 chroma FAILED with a
+;; factor-of-2 error before this fix was found -- flat 16x16 content at
+;; value 20 round-tripped to 10, exactly half, and a genuine AC/gradient
+;; chroma round-trip showed a large SSD, not a subtle off-by-one). The
+;; pattern matches `inverse-transform-2d`'s OWN `row-shift` case table
+;; exactly (`case log2W 2 0 3 1 4 2 5 2 6 2` -- row-shift SATURATES at 2
+;; once log2>=4; `col-shift` is a separate FIXED 4 regardless of size):
+;; solving for the exact final multiplier `forward-transform-2d` must
+;; apply (on top of the alpha-normalized two-axis DCT sum, which already
+;; contributes a factor of `n` = 2^log2 for the flat/DC case) against
+;; every probed value gives the closed form
+;;   scale(log2) = 2 ^ (7 - max(log2, 4))
+;; -- confirmed to reproduce every probed DC value exactly (8/8/8/4/2 for
+;; log2=2/3/4/5/6), AND independently confirmed for a genuine AC (non-DC)
+;; frequency too (k=0,l=1 probe at log2=4/TX_16X16, `Dequant[0][1]=8192`:
+;; scale=8 reproduced `inverse-transform-2d`'s real per-pixel output
+;; exactly across the whole probed row, where the OLD hardcoded 4.0 was
+;; off by exactly 2x on every sample) -- so this is confirmed for both DC
+;; and AC contributions, not merely the flat-DC case that would have been
+;; the smallest possible probe. `forward-scale` below implements this
+;; closed form; for log2=5/TX_32X32 (this task's original scope) it
+;; reduces to `2^(7-5) = 4` EXACTLY, the pre-existing hardcoded constant --
+;; so every pre-existing TX_32X32 caller's output is byte-for-byte
+;; unchanged by this fix.
 ;;
 ;; This was verified point-by-point against `inverse-transform-2d`'s real
 ;; (non-probed) output for several multi-coefficient combinations
@@ -395,6 +429,20 @@
   (if (zero? k)
     (Math/sqrt (/ 1.0 n))
     (Math/sqrt (/ 2.0 n))))
+
+(defn- forward-scale
+  "The final multiplier `forward-transform-2d` applies (on top of the
+   alpha-normalized two-axis forward DCT sum) to exactly invert
+   `inverse-transform-2d` for square transform size `2^log2` -- see the
+   SIZE GENERALIZATION note above for the derivation and probe values.
+   `2^(7 - max(log2,4))`: 8 for log2 in {2,3,4} (TX_4X4/TX_8X8/TX_16X16),
+   4 for log2=5 (TX_32X32, this task's original scope -- matches the
+   pre-existing hardcoded constant exactly), 2 for log2=6 (TX_64X64) --
+   log2=2..6 all directly probed against the real `inverse-transform-2d`
+   (see the SIZE GENERALIZATION note above), though this repo's encode
+   scope only ever calls this fn with log2=4 (chroma) or log2=5 (luma)."
+  [log2]
+  (Math/pow 2.0 (- 7 (max log2 4))))
 
 (defn- round-half-up
   "Math/round (Java) rounds half-up for both signs (round-toward-positive-
@@ -440,9 +488,10 @@
    each ROW's samples into that row's column-frequency coefficients, the
    direct structural mirror of `inverse-transform-2d`'s row-transform
    pass), then along rows (mirroring its column-transform pass), then the
-   overall x4 scale + round-to-integer (see namespace docstring's
-   derivation -- G=1/4 on the inverse side means 1/G=4 on this, the exact
-   inverse, side)."
+   size-dependent final scale (`forward-scale`, see namespace docstring's
+   SIZE GENERALIZATION note -- 4.0 for log2W=5/TX_32X32, matching this
+   fn's original hardcoded constant exactly; 8.0 for log2W=4/TX_16X16, the
+   chroma encode extension's new size) + round-to-integer."
   [residual log2W log2H]
   (let [w (bit-shift-left 1 log2W) h (bit-shift-left 1 log2H)
         rows (mapv (fn [i] (forward-dct-1d (mapv (fn [j] (nth residual (+ (* i w) j))) (range w)) w))
@@ -452,11 +501,12 @@
         ;; for each fixed column-frequency l.
         cols (mapv (fn [l]
                      (forward-dct-1d (mapv (fn [i] (nth (nth rows i) l)) (range h)) h))
-                   (range w))]
+                   (range w))
+        scale (forward-scale log2W)]
     ;; cols[l][k] = Coeff2D[k][l] (pre-scale); assemble row-major [k][l],
-    ;; apply the x4 scale, and round to integer.
+    ;; apply the size-dependent final scale, and round to integer.
     (vec (for [k (range h), l (range w)]
-           (round-half-up (* 4.0 (nth (nth cols l) k)))))))
+           (round-half-up (* scale (nth (nth cols l) k)))))))
 
 (defn quantize
   "Exact forward inverse of `dequantize` (up to the expected, normal

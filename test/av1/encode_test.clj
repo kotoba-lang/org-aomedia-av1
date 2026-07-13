@@ -64,6 +64,22 @@
         tile (first (:tiles (:tile-group result)))]
     (:luma-plane (:final-tile-state tile))))
 
+(defn- decode-all-planes
+  "Chroma encode extension (ADR-2607122000 Migration step 9 continuation):
+   same as `decode-luma-plane` above, but also returns `:u-plane`/
+   `:v-plane` for a color (`mono_chrome=0`) frame."
+  [bytes]
+  (let [seq-obu (find-obu bytes :obu-sequence-header)
+        seq-hdr (sh/parse (:reader-at-payload seq-obu))
+        frame-obu (find-obu bytes :obu-frame)
+        frame-hdr0 (fh/parse (:reader-at-payload frame-obu) seq-hdr)
+        decode-block-fn (db/make-decode-block-fn frame-hdr0 seq-hdr)
+        result (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn})
+        tile (first (:tiles (:tile-group result)))
+        st (:final-tile-state tile)]
+    {:luma-plane (:luma-plane st) :u-plane (:u-plane st) :v-plane (:v-plane st)
+     :seq-hdr seq-hdr :frame-hdr frame-hdr0}))
+
 (defn- ssd [a b] (reduce + (map (fn [x y] (let [d (- x y)] (* d d))) a b)))
 (defn- max-abs-diff [a b] (apply max (map (fn [x y] (abs (- (long x) (long y)))) a b)))
 
@@ -164,6 +180,97 @@
       (is (= our-decoded dav1d-decoded)))))
 
 ;; ---------------------------------------------------------------------
+;; 1b. CHROMA (Cb/Cr) round-trip against ORIGINAL target pixels (chroma
+;;     encode extension, ADR-2607122000 Migration step 9 continuation --
+;;     see av1.encode namespace docstring's chroma section). Same
+;;     methodology as section 1 above, extended to all three planes.
+
+(deftest color-flat-skip-roundtrip-test
+  (testing "a flat 128 Y/Cb/Cr 32x32 4:2:0 color frame, encoded with
+            skip=1 (no residual on any plane), decodes back to the target
+            EXACTLY on all three planes"
+    (let [y (vec (repeat 1024 128)) cb (vec (repeat 256 128)) cr (vec (repeat 256 128))
+          bytes (enc/encode-keyframe y 100 {:skip? true :cb cb :cr cr})
+          {:keys [luma-plane u-plane v-plane frame-hdr seq-hdr]} (decode-all-planes bytes)]
+      (is (= 0 (:mono-chrome seq-hdr)))
+      (is (= 3 (:num-planes frame-hdr)))
+      (is (= 1 (:subsampling-x seq-hdr)))
+      (is (= 1 (:subsampling-y seq-hdr)))
+      (is (= y luma-plane))
+      (is (= cb u-plane))
+      (is (= cr v-plane)))))
+
+(deftest color-gradient-small-lossy-error-test
+  (testing "a smooth luma sinusoid + linear Cb/Cr ramps round-trip with
+            small (expected, normal lossy-transform-coding) error at a
+            moderate quantizer -- genuinely different profiles per plane
+            so a plane-buffer/delta/cdf mixup would show up as a wrong (not
+            coincidentally-right) reconstruction"
+    (let [y (vec (for [_y (range 32) x (range 32)]
+                   (int (+ 128 (* 20 (Math/sin (* 2 Math/PI (/ x 32.0))))))))
+          cb (vec (for [_y (range 16) x (range 16)] (int (+ 100 (* 24 (/ x 15.0))))))
+          cr (vec (for [y (range 16) _x (range 16)] (int (+ 160 (* 18 (/ y 15.0))))))
+          bytes (enc/encode-keyframe y 60 {:skip? false :cb cb :cr cr})
+          {:keys [luma-plane u-plane v-plane]} (decode-all-planes bytes)]
+      (is (<= (max-abs-diff y luma-plane) 3))
+      (is (<= (max-abs-diff cb u-plane) 3))
+      (is (<= (max-abs-diff cr v-plane) 3))
+      (is (< (ssd y luma-plane) 500))
+      (is (< (ssd cb u-plane) 500))
+      (is (< (ssd cr v-plane) 500)))))
+
+(deftest color-cb-cr-mismatch-rejected-test
+  (testing ":cb without :cr (or vice versa) is rejected rather than
+            silently encoding monochrome or crashing uncontrolled"
+    (is (thrown? Exception (enc/encode-keyframe (vec (repeat 1024 128)) 100 {:cb (vec (repeat 256 128))})))
+    (is (thrown? Exception (enc/encode-keyframe (vec (repeat 1024 128)) 100 {:cr (vec (repeat 256 128))})))))
+
+;; ---------------------------------------------------------------------
+;; 2b. REAL independent decoder (dav1d/aomdec) validation for COLOR
+;;     fixtures -- see test/av1/fixtures.clj's docstrings for exactly how
+;;     each `encode-keyframe-32x32-color-*.obu`/`.dav1d.yuv` pair was
+;;     produced.
+
+(deftest dav1d-bit-exact-color-flat-test
+  (testing "encode-keyframe-32x32-color-flat: this repo's own decode of
+            its own checked-in COLOR encoder output is bit-exact (all
+            three planes) against dav1d's independent decode"
+    (let [{:keys [luma-plane u-plane v-plane]} (decode-all-planes (fixtures/encode-keyframe-32x32-color-flat-bytes))
+          golden (bytes->unsigned-vec (fixtures/encode-keyframe-32x32-color-flat-golden-yuv))
+          golden-y (subvec golden 0 1024) golden-u (subvec golden 1024 1280) golden-v (subvec golden 1280 1536)]
+      (is (= luma-plane golden-y))
+      (is (= u-plane golden-u))
+      (is (= v-plane golden-v))
+      (is (= luma-plane (vec (repeat 1024 128))))
+      (is (= u-plane (vec (repeat 256 128))))
+      (is (= v-plane (vec (repeat 256 128)))))))
+
+(deftest dav1d-bit-exact-color-gradient-test
+  (testing "encode-keyframe-32x32-color-gradient: bit-exact against dav1d
+            on all three planes (real multi-coefficient AC residual on
+            luma AND both chroma planes)"
+    (let [{:keys [luma-plane u-plane v-plane]} (decode-all-planes (fixtures/encode-keyframe-32x32-color-gradient-bytes))
+          golden (bytes->unsigned-vec (fixtures/encode-keyframe-32x32-color-gradient-golden-yuv))
+          golden-y (subvec golden 0 1024) golden-u (subvec golden 1024 1280) golden-v (subvec golden 1280 1536)]
+      (is (= luma-plane golden-y))
+      (is (= u-plane golden-u))
+      (is (= v-plane golden-v)))))
+
+(deftest dav1d-bit-exact-color-busy-golomb-test
+  (testing "encode-keyframe-32x32-color-busy: bit-exact against dav1d --
+            this fixture's quantized U/V coefficients both include several
+            with |value| > 14 (confirmed in test/av1/fixtures.clj's
+            docstring), so this is the regression test for
+            av1.encode-block/write-golomb reached via the CHROMA cdf-key
+            family (the monochrome busy fixture already covers luma's)"
+    (let [{:keys [luma-plane u-plane v-plane]} (decode-all-planes (fixtures/encode-keyframe-32x32-color-busy-bytes))
+          golden (bytes->unsigned-vec (fixtures/encode-keyframe-32x32-color-busy-golden-yuv))
+          golden-y (subvec golden 0 1024) golden-u (subvec golden 1024 1280) golden-v (subvec golden 1280 1536)]
+      (is (= luma-plane golden-y))
+      (is (= u-plane golden-u))
+      (is (= v-plane golden-v)))))
+
+;; ---------------------------------------------------------------------
 ;; 3. Determinism -- re-encoding with the same target pixels/args used to
 ;;    produce each checked-in fixture reproduces it byte-for-byte.
 
@@ -187,4 +294,31 @@
                         (max 0 (min 255 (int (+ 128 (* 60 (Math/sin (* 0.9 x)))
                                                 (* 40 (Math/cos (* 0.7 y)))
                                                 (* 15 (Math/sin (* 3.1 x)))))))))
-                 20 {:skip? false}))))))
+                 20 {:skip? false})))))
+  (testing "same, for the three checked-in COLOR (chroma encode extension)
+            fixtures"
+    (is (= (vec (bytes->unsigned-vec (fixtures/encode-keyframe-32x32-color-flat-bytes)))
+           (vec (enc/encode-keyframe (vec (repeat 1024 128)) 100
+                                      {:skip? true :cb (vec (repeat 256 128)) :cr (vec (repeat 256 128))}))))
+    (is (= (vec (bytes->unsigned-vec (fixtures/encode-keyframe-32x32-color-gradient-bytes)))
+           (vec (enc/encode-keyframe
+                 (vec (for [_y (range 32) x (range 32)]
+                        (int (+ 128 (* 20 (Math/sin (* 2 Math/PI (/ x 32.0))))))))
+                 60
+                 {:skip? false
+                  :cb (vec (for [_y (range 16) x (range 16)] (int (+ 100 (* 24 (/ x 15.0))))))
+                  :cr (vec (for [y (range 16) _x (range 16)] (int (+ 160 (* 18 (/ y 15.0))))))}))))
+    (is (= (vec (bytes->unsigned-vec (fixtures/encode-keyframe-32x32-color-busy-bytes)))
+           (vec (enc/encode-keyframe
+                 (vec (for [y (range 32) x (range 32)]
+                        (max 0 (min 255 (int (+ 128 (* 60 (Math/sin (* 0.9 x)))
+                                                (* 40 (Math/cos (* 0.7 y)))
+                                                (* 15 (Math/sin (* 3.1 x)))))))))
+                 20
+                 {:skip? false
+                  :cb (vec (for [y (range 16) x (range 16)]
+                             (max 0 (min 255 (int (+ 100 (* 50 (Math/sin (* 1.1 x)))
+                                                     (* 30 (Math/cos (* 0.5 y)))))))))
+                  :cr (vec (for [y (range 16) x (range 16)]
+                             (max 0 (min 255 (int (+ 160 (* 45 (Math/cos (* 0.8 x)))
+                                                     (* 35 (Math/sin (* 1.3 y)))))))))}))))))

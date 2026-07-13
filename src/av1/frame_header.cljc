@@ -1089,9 +1089,18 @@
 ;; header/write) -- the caller is responsible for pairing a `write` call
 ;; here with a sequence header of the intended dimensions, exactly like
 ;; `parse-frame-size` itself derives frame_width/frame_height from
-;; `seq-hdr` rather than reading them again per-frame."
+;; `seq-hdr` rather than reading them again per-frame. `:color?` (default
+;; `false`, preserving every pre-existing caller's exact output
+;; byte-for-byte) -- chroma (Cb/Cr) encode extension (ADR-2607122000
+;; Migration step 9 continuation): must be paired with an
+;; av1.sequence-header/write call using `:mono-chrome? false` (this fn
+;; itself never reads mono_chrome/num_planes -- those live in the
+;; sequence header -- `:color?` only controls whether THIS fn's own
+;; `quantization_params()` writes the two extra num_planes>1 delta_q_u_dc/
+;; delta_q_u_ac fields, per `parse-quantization-params`'s own
+;; `(> num-planes 1)` branch)."
 (defn write
-  [writer {:keys [base-q-idx]}]
+  [writer {:keys [base-q-idx color?] :or {color? false}}]
   (when-not (< 0 base-q-idx 256)
     (throw (ex-info "av1.frame-header/write: base-q-idx must be in 1..255 (0 forces CodedLossless=1, out of this repo's decode scope)"
                      {:base-q-idx base-q-idx})))
@@ -1131,7 +1140,23 @@
       ;; -- quantization_params() --
       (bw/f 8 base-q-idx)  ;; base_q_idx
       (bw/f 1 0)           ;; delta_q_y_dc: delta_coded = 0 (DeltaQYDc=0)
-      ;; num_planes==1 (mono) -> no uv delta fields read at all.
+      ;; num_planes==1 (mono) -> no uv delta fields read at all. num_planes==3
+      ;; (color, chroma encode extension): separate_uv_delta_q==0 (from the
+      ;; paired sequence header, see av1.sequence-header/write) means
+      ;; diff_uv_delta is NOT read at all (forced 0, `parse-quantization-
+      ;; params`'s own `(if (= separate-uv-delta-q 1) ...)` branch) -- only
+      ;; delta_q_u_dc/delta_q_u_ac are real reads; delta_q_v_dc/delta_q_v_ac
+      ;; are then forced EQUAL to delta_q_u_dc/delta_q_u_ac with NO further
+      ;; bits (diff_uv_delta==0 branch), so U and V share the same (here,
+      ;; zero) quantizer delta -- this fn writes delta_coded=0 for both,
+      ;; keeping chroma's DC/AC quantizer identical to luma's (base_q_idx
+      ;; directly), the simplest legal choice for this encode scope.
+      (as-> w w
+        (if color?
+          (-> w
+              (bw/f 1 0)   ;; delta_q_u_dc: delta_coded = 0 (DeltaQUDc=0)
+              (bw/f 1 0))  ;; delta_q_u_ac: delta_coded = 0 (DeltaQUAc=0)
+          w))
       (bw/f 1 0)           ;; using_qmatrix = 0
       ;; -- segmentation_params(): primary_ref_frame==PRIMARY_REF_NONE --
       (bw/f 1 0)           ;; segmentation_enabled = 0

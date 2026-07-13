@@ -950,7 +950,13 @@
 ;; exactly 7 -- but implemented as real map lookups (not a hardcoded
 ;; constant), so a future multi-leaf-chroma extension is a smaller change.
 
-(defn- get-txb-skip-ctx-chroma [state plane col row w4 h4 bw bh w h mi-cols mi-rows]
+(defn get-txb-skip-ctx-chroma
+  "Made public (visibility-only change, no logic change) for the same
+   reason get-coeff-base-ctx/get-coeff-br-ctx/get-dc-sign-ctx/record-above!/
+   record-left! already are -- av1.encode's chroma encode extension
+   (ADR-2607122000 Migration step 9 continuation) reuses this directly
+   rather than re-deriving the plane>0 txb_skip ctx formula a second time."
+  [state plane col row w4 h4 bw bh w h mi-cols mi-rows]
   (when (> (* bw bh) (* w h))
     (throw (ex-info "av1.decode-block: internal: get-txb-skip-ctx-chroma's +3 branch is unreachable for this namespace's only chroma block shape"
                      {:reason :unsupported-chroma-txb-skip-ctx})))
