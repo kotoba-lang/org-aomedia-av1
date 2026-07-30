@@ -13,11 +13,23 @@
    decode_partition() is implemented in full -- real default CDF tables,
    real context derivation (bsl / AvailU / AvailL, via a MiSizes grid this
    namespace maintains itself), real bool-decoder symbol reads through
-   av1.bool-decoder/read-symbol, down to every leaf partition. decode_block()
-   (mode info / residual / coefficient decoding) is explicitly NOT
-   implemented -- that is real pixel reconstruction, out of scope here. A
-   leaf partition is recorded as a tree node with `:leaf true` and
-   decode_partition() simply returns instead of calling decode_block().
+   av1.bool-decoder/read-symbol, down to every leaf partition. A leaf partition
+   is recorded as a tree node with `:leaf true` and decode_partition() returns
+   instead of calling decode_block().
+
+   **Pixel reconstruction is NOT absent from this repo, it just is not here.**
+   `av1.decode-block` reconstructs real pixels for a deliberately narrow slice
+   (see its own docstring for the exact boundary: BLOCK_32X32 leaves / TX_32X32 /
+   DCT_DCT / five intra modes for luma; TX_16X16 / UV_DC_PRED / 4:2:0 for
+   chroma). This namespace walks the partition tree for syntax and context
+   purposes and does not call it.
+
+   That distinction matters when sizing work on top of AV1: reading this
+   docstring alone suggests there is no reconstruction at all, the README
+   headline alone suggests there is, and the truth is reconstruction for a slice
+   too narrow to decode a file a real encoder would emit. A session assessing
+   this repo for AVIF support in 2026-07 was misled by the earlier wording of
+   this paragraph (com-junkawasaki/root ADR-2607300500 decision item 20).
 
    IMPORTANT CORRECTNESS CAVEAT: because decode_block() is never called, none
    of the bits/symbols it would read are consumed from the per-tile
