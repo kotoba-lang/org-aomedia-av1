@@ -29,6 +29,11 @@
    representation is simplicity-over-micro-optimization, matching this
    repo's usual stance (see av1.transform's docstring for the same
    tradeoff rationale)."
+  ;; `two-pow` lives in the reader. Copying it here would make two
+  ;; definitions of one fact, and the whole point of this namespace is that it
+  ;; is the reader's inverse -- so it should be reading the reader's constant,
+  ;; not restating it.
+  (:require [av1.bitreader :as br])
   #?(:clj (:refer-clojure)))
 
 (defn make-writer
@@ -64,14 +69,17 @@
    clamp path is a lossy saturating encode on the read side with no unique
    inverse, and this repo's encode scope never needs it)."
   [writer value]
-  (when (>= value (dec (bit-shift-left 1 32)))
+  ;; `br/two-pow`, not `(bit-shift-left 1 n)`: see its docstring. On
+  ;; ClojureScript the guard below used to read `(>= value 0)`, because
+  ;; `(dec (bit-shift-left 1 32))` is 0 there -- so every encode threw.
+  (when (>= value (dec (br/two-pow 32)))
     (throw (ex-info "av1.bitwriter/uvlc: value too large for this repo's non-saturating uvlc encode"
                      {:value value})))
   (let [leading-zeros (loop [lz 0]
-                         (if (< value (dec (bit-shift-left 1 (inc lz))))
+                         (if (< value (dec (br/two-pow (inc lz))))
                            lz
                            (recur (inc lz))))
-        extra (- value (dec (bit-shift-left 1 leading-zeros)))]
+        extra (- value (dec (br/two-pow leading-zeros)))]
     (-> writer
         (f leading-zeros 0)
         (f 1 1)
