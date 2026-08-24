@@ -16,6 +16,26 @@
    every read-fn returns `[value reader']`."
   #?(:clj (:refer-clojure)))
 
+;; ---------------------------------------------------------------------------
+;; 2^n, portably.
+;;
+;; `(bit-shift-left 1 n)` is not this. Every ClojureScript bitwise operator
+;; coerces to int32 first, so on that runtime the expression is
+;; -2147483648 at n=31 (the sign bit), 1 at n=32 (the shift count is taken
+;; mod 32) and 2 at n=33. Measured 2026-08-25 under nbb. The JVM answers
+;; 2147483648, 4294967296 and 8589934592.
+;;
+;; uvlc is where that lands in this codec: its saturating value is
+;; `2^32 - 1`, which came out as **0** on ClojureScript, and its
+;; `2^leading_zeros - 1` term went negative at 31 leading zeros. Neither
+;; threw; both returned a number of the right type.
+;; ---------------------------------------------------------------------------
+
+(defn two-pow
+  "2^n for n in 0..52, exact on both runtimes."
+  [n]
+  (loop [i 0 v 1] (if (>= i n) v (recur (inc i) (* v 2)))))
+
 (defn make-reader
   "byte-array (or vector of ints 0-255) -> reader map. Optionally start at
    byte offset `start-byte` (defaults to 0)."
@@ -79,9 +99,9 @@
     (let [[done r'] (f r 1)]
       (if (= done 1)
         (if (>= leading-zeros 32)
-          [(dec (bit-shift-left 1 32)) r']
+          [(dec (two-pow 32)) r']
           (let [[value r''] (f r' leading-zeros)]
-            [(+ value (dec (bit-shift-left 1 leading-zeros))) r'']))
+            [(+ value (dec (two-pow leading-zeros))) r'']))
         (recur (inc leading-zeros) r')))))
 
 (defn le
