@@ -16,7 +16,7 @@
    are NOT implemented -- that belongs to the pixel-reconstruction phase
    (tile_group_obu / decode_partition / decode_block), explicitly out of
    scope here. This module is verified against hand-derived bit vectors
-   (see test/av1/bool_decoder_test.clj) rather than a real encoded tile,
+   (see test/av1/bool_decoder_test.cljk) rather than a real encoded tile,
    because producing a real tile requires the full decode pipeline this
    phase intentionally does not build yet."
   (:require [av1.bitreader :as br]))

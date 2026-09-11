@@ -1077,7 +1077,7 @@
 ;; comments for exactly which fields are zero-bit vs. real writes.
 ;;
 ;; Verified the same way av1.sequence-header/write is: round-tripped back
-;; through `parse` itself (see test/av1/frame_header_encode_test.clj) --
+;; through `parse` itself (see test/av1/frame_header_encode_test.cljk) --
 ;; `parse`'s own `:base-q-idx`/`:frame-width`/`:tile-info`/`:tx-mode`/
 ;; etc. must reproduce exactly what `write` was asked to encode.
 ;;

@@ -420,7 +420,7 @@
 ;; This was verified point-by-point against `inverse-transform-2d`'s real
 ;; (non-probed) output for several multi-coefficient combinations
 ;; (including negative coefficients) before being relied on for real
-;; encode/decode round-trips -- see test/av1/transform_encode_test.clj.
+;; encode/decode round-trips -- see test/av1/transform_encode_test.cljk.
 
 (defn- alpha
   "Orthonormal 1D DCT-II/III basis normalization: alpha(0) = sqrt(1/n),

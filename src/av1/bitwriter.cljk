@@ -9,7 +9,7 @@
    decode->encode derivation) -- so every fn here is derived by literally
    inverting av1.bitreader's own fn, one descriptor at a time, and
    cross-checked by round-tripping through av1.bitreader itself (see
-   test/av1/bitwriter_test.clj): `(br/f (br/make-reader (to-bytes (f
+   test/av1/bitwriter_test.cljk): `(br/f (br/make-reader (to-bytes (f
    (make-writer) n v))) n)` must reproduce `v` for every descriptor.
 
    ENCODE scope (first AV1 encode support, ADR-2607122000 Migration step 9

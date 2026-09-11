@@ -36,7 +36,7 @@
 
    (ffmpeg 8.1.1 / libsvtav1, generated 2026-07-12). Used to validate
    av1.tile-group/decode-partition against a real multi-superblock tile --
-   see test/av1/tile_group_test.clj."
+   see test/av1/tile_group_test.cljk."
   []
   (load-resource "av1/fixtures/keyframe-256x192.obu"))
 
@@ -49,7 +49,7 @@
    PARTITION_SPLIT` unconditionally with ZERO bits/symbols read -- a
    deterministic assertion about av1.tile-group/decode-partition's control
    flow that holds regardless of the tile's actual bitstream content (see
-   test/av1/tile_group_test.clj's `decode-partition-forced-split-test`).
+   test/av1/tile_group_test.cljk's `decode-partition-forced-split-test`).
    Generated with:
 
      ffmpeg -y -f lavfi -i \"testsrc2=size=32x32:rate=1\" -frames:v 1 \\
@@ -93,7 +93,7 @@
    independent AV1 decoder implementation) produced the raw 8-bit gray
    32x32 luma plane checked in as `keyframe-32x32-gradient.dav1d.yuv` --
    see `keyframe-32x32-gradient-golden-yuv` below and
-   test/av1/decode_block_test.clj for the bit-exact comparison against
+   test/av1/decode_block_test.cljk for the bit-exact comparison against
    this repo's decoder."
   []
   (load-resource "av1/fixtures/keyframe-32x32-gradient.obu"))
@@ -101,7 +101,7 @@
 (defn keyframe-32x32-gradient-golden-yuv
   "dav1d's raw 8-bit gray decode of `keyframe-32x32-gradient-bytes` (1024
    bytes, row-major 32x32) -- the independent ground truth
-   test/av1/decode_block_test.clj compares this repo's decoder output
+   test/av1/decode_block_test.cljk compares this repo's decoder output
    against."
   []
   (load-resource "av1/fixtures/keyframe-32x32-gradient.dav1d.yuv"))
@@ -142,7 +142,7 @@
    Content is authored directly as known raw pixel bytes (not a lavfi
    filter), designed so a real, non-fabricated encoder RD decision
    reliably lands on this exact shape (verified empirically, see
-   `test/av1/decode_block_test.clj`):
+   `test/av1/decode_block_test.cljk`):
 
      - top-left: FLAT constant 128 (no neighbors available at all --
        forces DC_PRED trivially, AND -- because DC_PRED's have-one-
@@ -185,7 +185,7 @@
    cross-check: `dav1d -i keyframe-64x64-vpred.obu -o
    keyframe-64x64-vpred.dav1d.yuv` (dav1d 1.5.3) produced the raw 8-bit
    gray 64x64 luma plane checked in as `keyframe-64x64-vpred.dav1d.yuv`.
-   Empirically confirmed (see test/av1/decode_block_test.clj): all 4
+   Empirically confirmed (see test/av1/decode_block_test.cljk): all 4
    leaves are BLOCK_32X32/PARTITION_NONE/TX_32X32, top-left/top-right/
    bottom-left decode to y-mode DC_PRED (0), and bottom-right decodes to
    y-mode V_PRED (1) -- i.e. the real encoder genuinely chose V_PRED for
@@ -267,7 +267,7 @@
    keyframe-32x32-color.dav1d.yuv` (dav1d 1.5.3, a completely independent
    AV1 decoder) produced the raw 8-bit I420 planes (1024 Y + 256 U + 256 V
    bytes) checked in as `keyframe-32x32-color.dav1d.yuv` -- see
-   `keyframe-32x32-color-golden-yuv` below and test/av1/decode_block_test.clj
+   `keyframe-32x32-color-golden-yuv` below and test/av1/decode_block_test.cljk
    for the bit-exact comparison against this repo's decoder (all three
    planes). Empirically confirmed (not merely by construction): single
    BLOCK_32X32/PARTITION_NONE leaf, YMode=DC_PRED, UVMode=UV_DC_PRED,
@@ -279,7 +279,7 @@
 (defn keyframe-32x32-color-golden-yuv
   "dav1d's raw 8-bit I420 decode of `keyframe-32x32-color-bytes` (1536
    bytes: 1024 Y + 256 U + 256 V, row-major each plane) -- the independent
-   ground truth test/av1/decode_block_test.clj compares this repo's
+   ground truth test/av1/decode_block_test.cljk compares this repo's
    decoder output against, split per-plane."
   []
   (load-resource "av1/fixtures/keyframe-32x32-color.dav1d.yuv"))
@@ -351,7 +351,7 @@
    chroma planes in four 16x16 quadrants -- authored as a small Python
    script producing a raw y4m frame, not checked into this repo, since only
    the resulting bitstream + golden decode need to be reproducible).
-   Empirically confirmed (see test/av1/decode_block_test.clj): the 4
+   Empirically confirmed (see test/av1/decode_block_test.cljk): the 4
    leaves' `:eob`/`:u-eob`/`:v-eob` are 16/7/6 (top-left), 154/92/78
    (top-right), 67/29/16 (bottom-left), 277/121/136 (bottom-right) -- all
    4 genuinely different per plane, confirming 4 independently decoded
@@ -375,11 +375,11 @@
    1024 U + 1024 V bytes) checked in as
    `keyframe-64x64-color-multileaf.dav1d.yuv` -- see
    `keyframe-64x64-color-multileaf-golden-yuv` below and
-   test/av1/decode_block_test.clj for the bit-exact comparison against this
+   test/av1/decode_block_test.cljk for the bit-exact comparison against this
    repo's decoder (all three planes, all 4 leaves). `ffmpeg -loglevel debug`
    independently confirms `Frame 0: size 64x64 ... subsample 2x2 ... tiles
    1x1` (4:2:0, matching this repo's own decoded frame-header fields).
-   test/av1/decode_block_test.clj additionally confirms (not merely infers)
+   test/av1/decode_block_test.cljk additionally confirms (not merely infers)
    that all 4 leaves are genuinely BLOCK_32X32/PARTITION_NONE, and
    DC_PRED/UV_DC_PRED throughout (the only modes these encoder flags leave
    structurally possible)."
@@ -389,7 +389,7 @@
 (defn keyframe-64x64-color-multileaf-golden-yuv
   "dav1d's raw 8-bit I420 decode of `keyframe-64x64-color-multileaf-bytes`
    (6144 bytes: 4096 Y + 1024 U + 1024 V, row-major each plane) -- the
-   independent ground truth test/av1/decode_block_test.clj compares this
+   independent ground truth test/av1/decode_block_test.cljk compares this
    repo's decoder output against, split per-plane."
   []
   (load-resource "av1/fixtures/keyframe-64x64-color-multileaf.dav1d.yuv"))
@@ -415,7 +415,7 @@
    recursion depth and av1.decode-block's out-of-scope tx-size guard), not
    pixel reconstruction, so trivial flat content is sufficient (no bit-exact
    golden comparison is made against this fixture; see
-   test/av1/decode_block_test.clj's `split16-throws-on-block16x16-test`).
+   test/av1/decode_block_test.cljk's `split16-throws-on-block16x16-test`).
 
      aomenc --codec=av1 --limit=1 --passes=1 --end-usage=q --cq-level=32 \\
        --monochrome --enable-cdef=0 --enable-restoration=0 \\
@@ -430,7 +430,7 @@
        --obu -o keyframe-64x64-split16.obu keyframe-64x64-split16.y4m
 
    (aomenc from Homebrew, libaom 3.14.1, generated 2026-07-13). Empirically
-   confirmed (see test/av1/decode_block_test.clj): WITHOUT a
+   confirmed (see test/av1/decode_block_test.cljk): WITHOUT a
    `:decode-block-fn` wired in, av1.tile-group/decode-partition's first
    real (bit-exact-valid -- i.e. before decode_block()'s bit consumption
    would desync anything further, per that namespace's docstring)
@@ -497,7 +497,7 @@
    keyframe-8x8-adst-diag.dav1d.yuv` (dav1d 1.5.3) produced the raw 8-bit
    gray 8x8 luma plane checked in as `keyframe-8x8-adst-diag.dav1d.yuv` --
    see `keyframe-8x8-adst-diag-golden-yuv` below and
-   test/av1/decode_block_test.clj for the bit-exact comparison against
+   test/av1/decode_block_test.cljk for the bit-exact comparison against
    this repo's decoder, and for the assertion that the two center leaves
    (r=0,c=1 and r=1,c=0) really did decode as `:ADST_ADST` (not merely
    `:DCT_DCT`) -- i.e. this fixture exercises av1.transform/inverse-adst4!
@@ -509,7 +509,7 @@
 (defn keyframe-8x8-adst-diag-golden-yuv
   "dav1d's raw 8-bit gray decode of `keyframe-8x8-adst-diag-bytes` (64
    bytes, row-major 8x8) -- the independent ground truth
-   test/av1/decode_block_test.clj compares this repo's decoder output
+   test/av1/decode_block_test.cljk compares this repo's decoder output
    against."
   []
   (load-resource "av1/fixtures/keyframe-8x8-adst-diag.dav1d.yuv"))
@@ -548,7 +548,7 @@
    keyframe-8x8-adst-quad.dav1d.yuv` (dav1d 1.5.3) produced the raw 8-bit
    gray 8x8 luma plane checked in as `keyframe-8x8-adst-quad.dav1d.yuv` --
    see `keyframe-8x8-adst-quad-golden-yuv` below and
-   test/av1/decode_block_test.clj for the bit-exact comparison and the
+   test/av1/decode_block_test.cljk for the bit-exact comparison and the
    `:DCT_ADST` assertion on the bottom-right (r=1,c=1) leaf."
   []
   (load-resource "av1/fixtures/keyframe-8x8-adst-quad.obu"))
@@ -556,7 +556,7 @@
 (defn keyframe-8x8-adst-quad-golden-yuv
   "dav1d's raw 8-bit gray decode of `keyframe-8x8-adst-quad-bytes` (64
    bytes, row-major 8x8) -- the independent ground truth
-   test/av1/decode_block_test.clj compares this repo's decoder output
+   test/av1/decode_block_test.cljk compares this repo's decoder output
    against."
   []
   (load-resource "av1/fixtures/keyframe-8x8-adst-quad.dav1d.yuv"))
@@ -610,7 +610,7 @@
    keyframe-64x64-paeth.dav1d.yuv` (dav1d 1.5.3, a completely independent
    AV1 decoder) produced the raw 8-bit gray 64x64 luma plane checked in as
    `keyframe-64x64-paeth.dav1d.yuv`. Empirically confirmed (see
-   test/av1/decode_block_test.clj) -- NOT assumed by construction: all 4
+   test/av1/decode_block_test.cljk) -- NOT assumed by construction: all 4
    leaves are BLOCK_32X32/PARTITION_NONE/TX_32X32; top-left (r=0,c=0, eob
    21) and bottom-right (r=8,c=8, eob 21) decode to y-mode DC_PRED (0);
    top-right (r=0,c=8, eob 16) and bottom-left (r=8,c=0, eob 21) decode to
@@ -699,7 +699,7 @@
    keyframe-64x64-smooth.dav1d.yuv` (dav1d 1.5.3, a completely independent
    AV1 decoder) produced the raw 8-bit gray 64x64 luma plane checked in as
    `keyframe-64x64-smooth.dav1d.yuv`. Empirically confirmed (see
-   test/av1/decode_block_test.clj) -- NOT assumed by construction: all 4
+   test/av1/decode_block_test.cljk) -- NOT assumed by construction: all 4
    leaves are BLOCK_32X32/PARTITION_NONE/TX_32X32; top-left/top-right/
    bottom-left decode to y-mode DC_PRED (0, eob 0/67/78); bottom-right
    decodes to y-mode SMOOTH_PRED (9, eob 1) -- i.e. the real encoder
@@ -767,7 +767,7 @@
    (2048 bytes total, 1024 per frame) checked in as
    `inter-32x32-zeromv.dav1d.yuv` -- see
    `inter-32x32-zeromv-golden-yuv`/`inter-32x32-zeromv-frame-count` below
-   and test/av1/decode_block_test.clj for the bit-exact comparison against
+   and test/av1/decode_block_test.cljk for the bit-exact comparison against
    this repo's decoder (both frames). `aomdec --framestats` independently
    confirms the second frame's `qp,128` (max qindex -- the real encoder
    found the second frame needs essentially no signal at all, since it's
@@ -797,7 +797,7 @@
   "dav1d's raw 8-bit gray decode of `inter-32x32-zeromv-bytes` -- BOTH
    frames concatenated (2048 bytes: frame 1's 1024-byte luma plane then
    frame 2's), row-major each -- the independent ground truth
-   test/av1/decode_block_test.clj compares this repo's decoder output
+   test/av1/decode_block_test.cljk compares this repo's decoder output
    against, per frame."
   []
   (load-resource "av1/fixtures/inter-32x32-zeromv.dav1d.yuv"))
@@ -857,7 +857,7 @@
    `:IDTX`), and this repo's full reconstruction (predict_inter + real
    coefficient decode + dequantize + inverse DCT + reconstruct) is
    bit-exact (no tolerance) against dav1d's independent decode of the same
-   bitstream. See test/av1/decode_block_test.clj's inter residual test."
+   bitstream. See test/av1/decode_block_test.cljk's inter residual test."
   []
   (load-resource "av1/fixtures/inter-32x32-zeromv-residual.obu"))
 
@@ -877,7 +877,7 @@
 ;; the exact scope: a single monochrome 32x32 KEY_FRAME, one BLOCK_32X32/
 ;; PARTITION_NONE/DC_PRED/TX_32X32/DCT_DCT leaf) -- generated once
 ;; (2026-07-13) and checked in the same way real-encoder fixtures are, so
-;; test/av1/encode_test.clj's assertions don't need to invoke a real
+;; test/av1/encode_test.cljk's assertions don't need to invoke a real
 ;; encoder/decoder binary at test time (keeping the test suite hermetic,
 ;; matching every other test namespace in this repo). The paired
 ;; `.dav1d.yuv` files are REAL `dav1d`'s (1.5.3) independent decode of
@@ -958,7 +958,7 @@
    tolerance) against both `dav1d` and `aomdec`'s independent decodes of
    this same bitstream (NOT bit-exact against the original floating-point-
    designed target -- real lossy transform-coding quantization error, the
-   normal/expected kind, not a bug -- see test/av1/encode_test.clj for the
+   normal/expected kind, not a bug -- see test/av1/encode_test.cljk for the
    measured SSD)."
   []
   (load-resource "av1/fixtures/encode-keyframe-32x32-gradient.obu"))

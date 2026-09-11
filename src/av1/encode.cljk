@@ -60,14 +60,14 @@
 
    Validated the same way this task's every prior extension was: this
    repo's OWN decoder round-trips a real Cb/Cr target (see
-   test/av1/encode_test.clj's chroma round-trip tests), AND checked-in
+   test/av1/encode_test.cljk's chroma round-trip tests), AND checked-in
    `encode-keyframe-32x32-color-*.obu` fixtures (this repo's own encoder
    output) decode successfully via REAL `dav1d`/`aomdec` -- the strongest
    available check, since dav1d/aomdec accepting and correctly decoding a
    `mono_chrome=0` bitstream this repo itself produced confirms the
    sequence-header/frame-header/uv_mode/chroma-coeffs bit layout is
    genuinely spec-conformant, not merely self-consistent with this repo's
-   own decode side (see test/av1/fixtures.clj's docstrings for the exact
+   own decode side (see test/av1/fixtures.cljk's docstrings for the exact
    `dav1d`/`aomdec` invocations)."
   (:require [av1.bitwriter :as bw]
             [av1.bool-encoder :as be]

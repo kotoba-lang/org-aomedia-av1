@@ -315,7 +315,7 @@
 ;; fields to a small, fully-deterministic bit sequence (see this fn's
 ;; inline comments for exactly which fields are zero-bit-forced by this
 ;; choice) -- verified by round-tripping this fn's own output back through
-;; `parse` itself (see test/av1/sequence_header_encode_test.clj), the
+;; `parse` itself (see test/av1/sequence_header_encode_test.cljk), the
 ;; strongest available check since `parse` is the same spec-transcribed
 ;; reader this repo's decode side already validates against real
 ;; aomenc/SVT-AV1 streams.
