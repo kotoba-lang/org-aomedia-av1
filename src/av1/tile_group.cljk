@@ -49,7 +49,7 @@
    byte size (`SymbolMaxBits`) is exhausted. Walking a whole real multi-
    superblock tile to completion without throwing is therefore still a
    meaningful validation of the CDF-table/context-derivation/bool-decoder
-   wiring end-to-end (see test/av1/tile_group_test.clj); bit-exact validation
+   wiring end-to-end (see test/av1/tile_group_test.cljk); bit-exact validation
    of the FULL tile (beyond the first leaf) requires decode_block(), out of
    scope here.
 

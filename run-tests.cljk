@@ -16,7 +16,7 @@
    Anything added to `test/` as `.cljc` belongs in BOTH lists below; being
    required is not being run.
 
-     nbb --classpath \"$(clojure -Spath -M:test)\" run-tests.cljs"
+     nbb --classpath \"$(clojure -Spath -M:test)\" run-tests.cljk"
   (:require [cljs.test :as t]
             [av1.uvlc-boundary-test]))
 

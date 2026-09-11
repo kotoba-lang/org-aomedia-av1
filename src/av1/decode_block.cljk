@@ -35,7 +35,7 @@
        read at the top-level BLOCK_64X64 call to be PARTITION_SPLIT,
        producing exactly 4 BLOCK_32X32 leaves in a 2x2 grid) -- every leaf
        is still exactly BLOCK_32X32/TX_32X32/DCT_DCT (luma). See test/av1/
-       decode_block_test.clj / test/av1/fixtures.clj for how each real
+       decode_block_test.clj / test/av1/fixtures.cljk for how each real
        aomenc encode was steered into its exact shape;
      - exactly ONE luma transform size is supported: TX_32X32 (`tx-mode`
        must be `:tx-mode-largest` and the block's Max_Tx_Size_Rect must
@@ -486,7 +486,7 @@
 ;; error-resilient/no-order-hint zero-motion fixture's real encoder chose
 ;; NEARESTMV here, not GLOBALMV/NEWMV as originally guessed at design time
 ;; -- confirmed by actually decoding and inspecting the real y-mode, not
-;; merely assumed, see test/av1/fixtures.clj's inter fixture docstring).
+;; merely assumed, see test/av1/fixtures.cljk's inter fixture docstring).
 ;; This namespace's `RefMvIdx`/`assign_mv` derivation below (see
 ;; `assign-mv`) shows NEARESTMV and NEARMV are legitimately, not just
 ;; conveniently, in scope for the SAME reason GLOBALMV is: in this

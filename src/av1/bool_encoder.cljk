@@ -49,8 +49,8 @@
    bookkeeping the real implementation needs purely to stay within 64 bits
    -- verified by exact byte-for-byte comparison against dav1d's
    independent decode of this repo's own encoded output (see
-   test/av1/bool_encoder_test.clj and the round-trip tests in
-   test/av1/encode_test.clj).
+   test/av1/bool_encoder_test.cljk and the round-trip tests in
+   test/av1/encode_test.cljk).
 
    PORTABILITY (JVM Clojure ONLY -- a deliberate, documented exception to
    this repo's usual `.cljc` convention, not an oversight): because

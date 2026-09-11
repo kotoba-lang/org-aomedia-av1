@@ -1,7 +1,7 @@
 (ns av1.uvlc-boundary-test
   "uvlc at the width where `(bit-shift-left 1 n)` stops meaning 2^n.
 
-  `.cljc`, and reachable from `run-tests.cljs`, on purpose. Every source file
+  `.cljc`, and reachable from `run-tests.cljk`, on purpose. Every source file
   in this repository is `.cljc` -- a claim that it runs on ClojureScript --
   and until 2026-08-25 every test was `.clj` and there was no ClojureScript
   runner, so the claim had never been executed (root ADR-2608730000).

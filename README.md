@@ -107,8 +107,8 @@ also support `V_PRED` and `H_PRED` (`av1.intra-pred/v-predict`/
 pAngle==90/180 cases), validated against two real **multi-leaf** aomenc
 frames (a 64x64-pixel, single-superblock frame forced via
 `--min-partition-size=32 --max-partition-size=32` into a real 2x2 grid of
-BLOCK_32X32 leaves -- see `test/av1/fixtures.clj` for the exact content
-design and `test/av1/decode_block_test.clj` for the bit-exact assertions).
+BLOCK_32X32 leaves -- see `test/av1/fixtures.cljk` for the exact content
+design and `test/av1/decode_block_test.cljk` for the bit-exact assertions).
 This required two real extensions beyond just adding the prediction math:
 
 - **Real cross-block context**, not the single-leaf shortcuts the
@@ -365,7 +365,7 @@ not just a second read of the same spec paragraph.
   approximation, for the `reduced_tx_set==1` case.
 - **Real-decode validation**: two new REAL aomenc-encoded 8x8 monochrome
   fixtures (`keyframe-8x8-adst-diag`/`keyframe-8x8-adst-quad`, see
-  test/av1/fixtures.clj docstrings), each forced into a real 2x2 grid of
+  test/av1/fixtures.cljk docstrings), each forced into a real 2x2 grid of
   BLOCK_4X4 leaves with a diagonal or per-quadrant step-edge content
   design chosen because ADST responds better than DCT to content that
   isn't symmetric about the block boundary. Both fixtures are confirmed
@@ -374,7 +374,7 @@ not just a second read of the same spec paragraph.
   in the diag fixture) and `DCT_ADST` (1 leaf in the quad fixture) --
   and both reconstructions are bit-exact (no tolerance) against dav1d's
   independent decode of the same bitstream. See
-  `test/av1/decode_block_test.clj`'s `adst-diag-8x8-bit-exact-test`/
+  `test/av1/decode_block_test.cljk`'s `adst-diag-8x8-bit-exact-test`/
   `adst-quad-8x8-bit-exact-test`.
 - **Explicitly NOT covered by this extension**: `IDTX`/`V_DCT`/`H_DCT`/any
   `FLIPADST_*` type (no identity-transform or flip-reconstruction path in
@@ -448,7 +448,7 @@ already (and correctly) excludes PAETH_PRED with no code change.
   this extension's own validation fixture is monochrome, so this guard is
   documented but not exercised against real data.
 - **Real-decode validation**: one new REAL aomenc-encoded 64x64 monochrome
-  fixture (`keyframe-64x64-paeth`, see test/av1/fixtures.clj's docstring),
+  fixture (`keyframe-64x64-paeth`, see test/av1/fixtures.cljk's docstring),
   the same real-MULTI-leaf construction as the V_PRED/H_PRED fixtures (one
   64x64 superblock forced via `--min-partition-size=32
   --max-partition-size=32` into a real 2x2 grid of BLOCK_32X32 leaves), but
@@ -469,7 +469,7 @@ already (and correctly) excludes PAETH_PRED with no code change.
   which has BOTH real above and left neighbors), and the full
   reconstruction is bit-exact (no tolerance) against dav1d's independent
   decode of the same bitstream. See
-  `test/av1/decode_block_test.clj`'s `paeth-pred-64x64-bit-exact-test`.
+  `test/av1/decode_block_test.cljk`'s `paeth-pred-64x64-bit-exact-test`.
 - **Explicitly NOT covered by this extension**: chroma (Cb/Cr) + luma
   PAETH_PRED (see above); SMOOTH_PRED/SMOOTH_V_PRED/SMOOTH_H_PRED (spec
   7.11.2.6, a different prediction process entirely -- see next section for
@@ -544,7 +544,7 @@ correctly) excludes SMOOTH_PRED with no code change.
   monochrome too, so this guard remains documented but not exercised
   against real data.
 - **Real-decode validation**: one new REAL aomenc-encoded 64x64 monochrome
-  fixture (`keyframe-64x64-smooth`, see test/av1/fixtures.clj's docstring),
+  fixture (`keyframe-64x64-smooth`, see test/av1/fixtures.cljk's docstring),
   the same real-MULTI-leaf construction as the vpred/hpred/paeth fixtures
   (one 64x64 superblock forced via `--min-partition-size=32
   --max-partition-size=32` into a real 2x2 grid of BLOCK_32X32 leaves), but
@@ -567,7 +567,7 @@ correctly) excludes SMOOTH_PRED with no code change.
   the content matching the SMOOTH_PRED formula almost exactly), and the
   full reconstruction is bit-exact (no tolerance) against dav1d's
   independent decode of the same bitstream. See
-  `test/av1/decode_block_test.clj`'s `smooth-pred-64x64-bit-exact-test`.
+  `test/av1/decode_block_test.cljk`'s `smooth-pred-64x64-bit-exact-test`.
 - **Explicitly NOT covered by this extension**: chroma (Cb/Cr) + luma
   SMOOTH_PRED (see above); SMOOTH_V_PRED/SMOOTH_H_PRED (the two 1D
   simplifications of 7.11.2.6, not implemented -- `av1.decode-block`
@@ -752,7 +752,7 @@ resulting `expectedFrameId[]` is discarded, not tracked).
 
 **Real-decode validation**: two new REAL aomenc (libaom 3.14.1)-encoded
 32x32 MONOCHROME 2-frame (keyframe + inter) sequences (see
-`test/av1/fixtures.clj`'s `inter-32x32-zeromv-bytes`/
+`test/av1/fixtures.cljk`'s `inter-32x32-zeromv-bytes`/
 `inter-32x32-zeromv-residual-bytes` docstrings for the full aomenc
 invocations and real-encoder findings):
 
@@ -768,7 +768,7 @@ invocations and real-encoder findings):
   frame 2's `qp,128`, the max qindex, with only 31 bytes of payload). Both
   frames' full reconstructions are bit-exact (no tolerance) against
   dav1d's independent decode of the same bitstream. See
-  `test/av1/decode_block_test.clj`'s `inter-zeromv-bit-exact-test`.
+  `test/av1/decode_block_test.cljk`'s `inter-zeromv-bit-exact-test`.
 - `inter-32x32-zeromv-residual`: frame 2 adds a per-pixel checkerboard
   perturbation (+/-6, no translational structure for a real motion search
   to exploit) to the same base ramp, forcing a genuine nonzero residual
@@ -782,7 +782,7 @@ invocations and real-encoder findings):
   maximally high-frequency), and the full reconstruction (predict_inter +
   real coefficient decode + dequantize + inverse DCT + reconstruct) is
   bit-exact against dav1d's independent decode. See
-  `test/av1/decode_block_test.clj`'s `inter-zeromv-residual-bit-exact-test`.
+  `test/av1/decode_block_test.cljk`'s `inter-zeromv-residual-bit-exact-test`.
 
 ## Validation
 
@@ -894,7 +894,7 @@ dav1d -i keyframe-32x32-gradient.obu -o keyframe-32x32-gradient.dav1d.yuv
 (aomenc/libaom 3.14.1, dav1d 1.5.3, both from Homebrew, generated
 2026-07-13; both `.obu` and the corresponding `.dav1d.yuv` golden output
 are checked in under `resources/av1/fixtures/` -- see
-`test/av1/fixtures.clj` docstrings for exactly how each was produced).
+`test/av1/fixtures.cljk` docstrings for exactly how each was produced).
 `av1.decode-block-test` additionally checks that the frame really did
 decode to the expected single BLOCK_32X32/PARTITION_NONE/TX_32X32 leaf
 shape (not merely that it happened not to throw), and a third test
@@ -929,7 +929,7 @@ dav1d -i keyframe-64x64-vpred.obu -o keyframe-64x64-vpred.dav1d.yuv
 ```
 
 (same aomenc/dav1d versions, generated 2026-07-13; `keyframe-64x64-hpred`
-uses identical flags with transposed content -- see `test/av1/fixtures.clj`
+uses identical flags with transposed content -- see `test/av1/fixtures.cljk`
 docstrings for exactly how each fixture's content was designed to make a
 real encoder RD decision, not a hand-picked bit pattern, land on this
 exact shape). `--enable-directional-intra=1 --enable-diagonal-intra=0` is
@@ -1007,7 +1007,7 @@ dav1d -i keyframe-32x32-color.obu -o keyframe-32x32-color.dav1d.yuv
 (aomenc/libaom 3.14.1, dav1d 1.5.3, both from Homebrew, generated
 2026-07-13; both `.obu` and the corresponding `.dav1d.yuv` golden I420
 output -- 1024 Y + 256 U + 256 V bytes -- are checked in under
-`resources/av1/fixtures/`; see `test/av1/fixtures.clj` docstrings for
+`resources/av1/fixtures/`; see `test/av1/fixtures.cljk` docstrings for
 exactly how each was produced). `av1.decode-block-test` additionally
 confirms (not merely infers) the real encoder chose DC_PRED/UV_DC_PRED
 and the single BLOCK_32X32/PARTITION_NONE/TX_32X32(luma)/TX_16X16(chroma)
@@ -1036,9 +1036,9 @@ are 16/7/6 (top-left), 154/92/78 (top-right), 67/29/16 (bottom-left),
 leaves' reconstructed 16x16 Cb/Cr quadrants (pulled directly out of the
 shared 32x32 plane buffers) are pairwise distinct pixel content -- both
 confirm 4 genuinely independently-decoded chroma blocks, not one leaf's
-result reused/broadcast across all 4 (see `test/av1/fixtures.clj`'s
+result reused/broadcast across all 4 (see `test/av1/fixtures.cljk`'s
 docstring for the exact aomenc invocation and content formulas, and
-`test/av1/decode_block_test.clj`'s `multi-leaf-color-64x64-bit-exact-test`
+`test/av1/decode_block_test.cljk`'s `multi-leaf-color-64x64-bit-exact-test`
 for the assertions). A companion test (`shared-chroma-block-throws-test`)
 confirms that a leaf whose `mi-size` is NOT BLOCK_32X32 (the AV1 spec's
 "shared chroma block" case for small luma partitions) is rejected with
@@ -1075,7 +1075,7 @@ non-BLOCK_32X32 leaves (any deeper `PARTITION_SPLIT` recursion, or a
 real bitstream and fails safely (a clear `ex-info`, not a silent
 mis-decode or an uncontrolled crash) rather than merely being asserted by
 inspecting `av1.tables/Max-Tx-Size-Rect` directly. See
-`test/av1/fixtures.clj`/`test/av1/decode_block_test.clj`
+`test/av1/fixtures.cljk`/`test/av1/decode_block_test.cljk`
 (`split16-throws-on-block16x16-test`) for the exact aomenc invocation and
 assertions.
 
@@ -1263,11 +1263,11 @@ support (V_PRED/H_PRED/PAETH/SMOOTH/ADST/inter):
 
 | ns | role |
 |---|---|
-| `av1.bitwriter` | MSB-first bit writer -- the exact structural inverse of `av1.bitreader`'s descriptors (`f`/`uvlc`/`le`/`leb128`/`su`/`ns`/`byte-alignment`), plus `trailing-bits` (spec 5.3.4's `trailing_one_bit`+zero-pad, distinct from plain `byte-alignment` -- see below). Verified by round-tripping every descriptor back through `av1.bitreader` across a wide value range (`test/av1/bitwriter_test.clj`) |
-| `av1.bool-encoder` | the AV1 Symbol ENCODER -- ported from libaom's real `od_ec_enc_*` family (`aom_dsp/entenc.c`/`entenc.h`, AOMediaCodec/aom master), the actual encode-side counterpart of the daala-derived range coder `av1.bool-decoder` implements the decode side of (there is no spec text for this at all). CDF adaptation is shared with `av1.bool-decoder` via a factored-out `av1.bool-decoder/adapt-cdf` public fn, so both sides are structurally guaranteed to adapt identically. Implementation simplification: never flushes `low`/`cnt` mid-stream (correct but unbounded-growing, safe for this repo's tiny single-keyframe scope) -- **JVM Clojure only** (`.clj`, not `.cljc`: needs true `bigint` arithmetic, which does not exist in ClojureScript's numeric tower, confirmed via clj-kondo -- see its namespace docstring for the full portability note and what a cljs port would need). Verified against `av1.bool-decoder` across thousands of mixed-cdf symbol round-trips (`test/av1/bool_encoder_test.clj`) |
-| `av1.transform` (additions) | `forward-transform-2d`/`quantize` -- the exact forward inverse of the pre-existing `inverse-transform-2d`/`dequantize`, derived by NUMERICALLY PROBING the real inverse transform (not re-derived from an external forward-DCT source) to discover its exact orthonormal-basis scale factor, then confirmed point-by-point against multi-coefficient probes before being relied on (see `forward-transform-2d`'s docstring for the full derivation). Verified: exact round-trip for flat/low-frequency residuals, small bounded lossy error for busier content at a fine quantizer (`test/av1/transform_encode_test.clj`). Chroma encode extension (see below): the final scale is now a size-dependent `forward-scale` closed form (`2^(7-max(log2,4))`) rather than a hardcoded `TX_32X32`-only constant -- a real bug (factor-of-2 error for `TX_16X16`) this extension's own validation caught and fixed |
+| `av1.bitwriter` | MSB-first bit writer -- the exact structural inverse of `av1.bitreader`'s descriptors (`f`/`uvlc`/`le`/`leb128`/`su`/`ns`/`byte-alignment`), plus `trailing-bits` (spec 5.3.4's `trailing_one_bit`+zero-pad, distinct from plain `byte-alignment` -- see below). Verified by round-tripping every descriptor back through `av1.bitreader` across a wide value range (`test/av1/bitwriter_test.cljk`) |
+| `av1.bool-encoder` | the AV1 Symbol ENCODER -- ported from libaom's real `od_ec_enc_*` family (`aom_dsp/entenc.c`/`entenc.h`, AOMediaCodec/aom master), the actual encode-side counterpart of the daala-derived range coder `av1.bool-decoder` implements the decode side of (there is no spec text for this at all). CDF adaptation is shared with `av1.bool-decoder` via a factored-out `av1.bool-decoder/adapt-cdf` public fn, so both sides are structurally guaranteed to adapt identically. Implementation simplification: never flushes `low`/`cnt` mid-stream (correct but unbounded-growing, safe for this repo's tiny single-keyframe scope) -- **JVM Clojure only** (`.clj`, not `.cljc`: needs true `bigint` arithmetic, which does not exist in ClojureScript's numeric tower, confirmed via clj-kondo -- see its namespace docstring for the full portability note and what a cljs port would need). Verified against `av1.bool-decoder` across thousands of mixed-cdf symbol round-trips (`test/av1/bool_encoder_test.cljk`) |
+| `av1.transform` (additions) | `forward-transform-2d`/`quantize` -- the exact forward inverse of the pre-existing `inverse-transform-2d`/`dequantize`, derived by NUMERICALLY PROBING the real inverse transform (not re-derived from an external forward-DCT source) to discover its exact orthonormal-basis scale factor, then confirmed point-by-point against multi-coefficient probes before being relied on (see `forward-transform-2d`'s docstring for the full derivation). Verified: exact round-trip for flat/low-frequency residuals, small bounded lossy error for busier content at a fine quantizer (`test/av1/transform_encode_test.cljk`). Chroma encode extension (see below): the final scale is now a size-dependent `forward-scale` closed form (`2^(7-max(log2,4))`) rather than a hardcoded `TX_32X32`-only constant -- a real bug (factor-of-2 error for `TX_16X16`) this extension's own validation caught and fixed |
 | `av1.encode-block` | `write-coeffs`/`write-skip`/`write-y-mode` -- the encode-side inverse of `av1.decode-block`'s `read-coeffs`/`read-skip`/`read-y-mode`, for this section's narrow scope only. Reuses `av1.decode-block`'s own context-derivation helpers directly (`get-coeff-base-ctx`/`get-coeff-br-ctx`/`get-dc-sign-ctx`/`get-txb-skip-ctx-chroma`/`record-above!`/`record-left!`, made public there for exactly this reason -- a visibility-only change, no decode-side logic change) rather than re-transcribing them, so context derivation cannot independently drift between encode and decode. Implements the full `coeff_base`/`coeff_base_eob`/`coeff_br` continuation AND the golomb escape code (`write-golomb`) for real -- not just the common case (see the `busy` fixture below). Chroma encode extension (see below): also `write-uv-mode` -- `write-coeffs` itself needed ZERO changes to serve chroma (already generalized over plane/tx-size via its `spec` argument) |
-| `av1.sequence-header`/`av1.frame-header` (additions) | `write` -- narrow encode-side inverses of `parse`, covering exactly the field combination this scope needs (`reduced_still_picture_header=1`, monochrome, single tile, `TX_MODE_LARGEST`, no segmentation/delta-q/delta-lf/CDEF/loop-restoration/film-grain/superres) -- NOT a full general inverse of every `parse` branch. Verified by round-tripping back through `parse` itself (`test/av1/sequence_header_encode_test.clj`/`test/av1/frame_header_encode_test.clj`). Chroma encode extension (see below): `av1.sequence-header/write` gained optional `:mono-chrome?` (default `true`), `av1.frame-header/write` gained optional `:color?` (default `false`) -- both byte-for-byte unchanged for every pre-existing caller |
+| `av1.sequence-header`/`av1.frame-header` (additions) | `write` -- narrow encode-side inverses of `parse`, covering exactly the field combination this scope needs (`reduced_still_picture_header=1`, monochrome, single tile, `TX_MODE_LARGEST`, no segmentation/delta-q/delta-lf/CDEF/loop-restoration/film-grain/superres) -- NOT a full general inverse of every `parse` branch. Verified by round-tripping back through `parse` itself (`test/av1/sequence_header_encode_test.cljk`/`test/av1/frame_header_encode_test.cljk`). Chroma encode extension (see below): `av1.sequence-header/write` gained optional `:mono-chrome?` (default `true`), `av1.frame-header/write` gained optional `:color?` (default `false`) -- both byte-for-byte unchanged for every pre-existing caller |
 | `av1.obu` (addition) | `write-obu`/`write-obu-header` -- OBU framing (header + leb128 `obu_size` + payload), low-overhead format only, no extension header |
 | `av1.encode` | top-level orchestration (`encode-keyframe`): pixels -\> DC_PRED residual -\> forward-transform-2d/quantize -\> `av1.encode-block`/bool-encoder -\> `av1.frame-header`/`av1.sequence-header` `write` -\> OBU framing -\> a complete, standalone, legal AV1 bitstream. Chroma encode extension (see below): optional `:cb`/`:cr` args produce a 4:2:0 color keyframe instead |
 
@@ -1292,19 +1292,19 @@ pre-existing plain-zero-pad `byte-alignment`, which remains correct for
 
 Four fixtures (`resources/av1/fixtures/encode-keyframe-32x32-{flat,dc,
 gradient,busy}.obu`), all THIS REPO'S OWN encoder output (not a real
-encoder's -- see `test/av1/fixtures.clj` docstrings for the exact
+encoder's -- see `test/av1/fixtures.cljk` docstrings for the exact
 `av1.encode/encode-keyframe` invocation behind each one), validated
 against **two independent real decoders**:
 
 - `dav1d` (1.5.3): `dav1d -i <name>.obu -o <name>.dav1d.yuv` -- succeeds
   (no error) for all four, and this repo's own decode of each fixture is
   **bit-exact (no tolerance)** against dav1d's independent decode
-  (`test/av1/encode_test.clj`'s `dav1d-bit-exact-*-test`s, checked against
+  (`test/av1/encode_test.cljk`'s `dav1d-bit-exact-*-test`s, checked against
   the checked-in `.dav1d.yuv` golden files).
 - `aomdec` (libaom 3.14.1, `aomdec --i420 -o ... <name>.obu`): also
   succeeds for all four, with its Y-plane output byte-identical to
   dav1d's -- a second independent decoder implementation agreeing with
-  the first (recorded in `test/av1/fixtures.clj`'s docstrings; not
+  the first (recorded in `test/av1/fixtures.cljk`'s docstrings; not
   re-checked at test time, to keep the test suite hermetic like every
   other test namespace in this repo).
 
@@ -1395,7 +1395,7 @@ monochrome-only shape.
   giving `8.0` for `TX_16X16`. Confirmed for both the DC and a genuine AC
   (non-DC) frequency, not merely the flat-DC case. See
   `av1.transform`'s namespace docstring's SIZE GENERALIZATION note and
-  `test/av1/transform_encode_test.clj`'s TX_16X16 regression tests.
+  `test/av1/transform_encode_test.cljk`'s TX_16X16 regression tests.
 - **`av1.sequence-header/write`** gained an optional `:mono-chrome?`
   (default `true`, byte-for-byte unchanged for every pre-existing caller)
   -- when `false`, writes the real `mono_chrome=0`/4:2:0 `color_config()`
@@ -1415,14 +1415,14 @@ monochrome-only shape.
 **Validation**: three fixtures
 (`resources/av1/fixtures/encode-keyframe-32x32-color-{flat,gradient,
 busy}.obu`), all THIS REPO'S OWN encoder output (`av1.encode/
-encode-keyframe` with `:cb`/`:cr` supplied -- see `test/av1/fixtures.clj`
+encode-keyframe` with `:cb`/`:cr` supplied -- see `test/av1/fixtures.cljk`
 docstrings for the exact invocation behind each one), validated against
 the SAME two independent real decoders the monochrome encode fixtures
 use:
 
 - `dav1d` (1.5.3): succeeds (no error) for all three, and this repo's own
   decode of each fixture is **bit-exact (no tolerance, all three planes)**
-  against dav1d's independent decode (`test/av1/encode_test.clj`'s
+  against dav1d's independent decode (`test/av1/encode_test.cljk`'s
   `dav1d-bit-exact-color-*-test`s).
 - `aomdec` (libaom 3.14.1, `--i420`): also succeeds for all three, with
   its Y+U+V output byte-identical to dav1d's.
