@@ -1466,11 +1466,11 @@ restrictions the luma-only encode pass above already documents.
 ## Test
 
 ```sh
-clojure -M:test
+kbb -M:test
 ```
 
 ## Lint
 
 ```sh
-clojure -M:lint
+kbb -M:lint
 ```

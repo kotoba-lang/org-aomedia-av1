@@ -10,13 +10,13 @@
    The `.clj` suites are not listed and are not silently forgotten: they use
    `byte-array` and other JVM-only interop in their fixtures. Converting them
    is separate work, and until it is done this file covers less than
-   `clojure -M:test` does -- which is why the JVM suite remains the primary
+   `kbb -M:test` does -- which is why the JVM suite remains the primary
    gate and this is an addition to it, not a replacement.
 
    Anything added to `test/` as `.cljc` belongs in BOTH lists below; being
    required is not being run.
 
-     nbb --classpath \"$(clojure -Spath -M:test)\" run-tests.cljk"
+     kbb --backend sci --classpath \"$(kbb -Spath -M:test)\" run-tests.cljk"
   (:require [cljs.test :as t]
             [av1.uvlc-boundary-test]))
 
