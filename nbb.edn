@@ -1,0 +1,12 @@
+;; kbb reads this file. It does NOT read deps.edn, and the
+;; .cljk here are run as bare `kbb -M:test`, so a coordinate declared only
+;; there is invisible to the engine.
+;;
+;; Unblock recipe (runbook: kotoba-runner-loading.md): copy the coords from
+;; deps.edn HERE — every sha below is COPIED from deps.edn, not chosen.
+;; 2026-09-21 conformance cron attempt (first).
+{:paths ["src" "."]
+ :deps {
+        io.github.kotoba-lang/codec-primitives
+        {:git/url "https://github.com/kotoba-lang/codec-primitives.git"
+         :git/sha "ffa076057caedcfaabb9645c84e002ee468f8268"}}}
