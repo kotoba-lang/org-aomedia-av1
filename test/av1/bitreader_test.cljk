@@ -5,7 +5,7 @@
    are bit-level primitives with no independent 'real data' to check them
    against (av1.sequence-header-test covers real-stream validation for the
    composite parsers built on top of these primitives)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]))
 
 (defn bytes->reader [byte-seq]

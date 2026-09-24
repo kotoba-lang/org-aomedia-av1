@@ -31,7 +31,7 @@
         stale (drifted from the current encoder) and that encoding is
         deterministic (no hidden randomness/nondeterministic map-ordering
         dependency)."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.test :refer [deftest testing is]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
             [av1.sequence-header :as sh]

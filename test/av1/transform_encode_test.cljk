@@ -10,7 +10,7 @@
    inverse-transform-2d before being relied on), and with small, expected
    lossy-quantization error for busier content (normal for any DCT-based
    codec, not a bug)."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.test :refer [deftest testing is]]
             [av1.transform :as tf]))
 
 (defn- ssd [a b] (reduce + (map (fn [x y] (let [d (- x y)] (* d d))) a b)))

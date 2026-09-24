@@ -20,7 +20,7 @@
 
   `av1.bitreader-test`'s existing uvlc coverage stops at one leading zero,
   which is why none of this showed up there."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.bitwriter :as bw]))
 

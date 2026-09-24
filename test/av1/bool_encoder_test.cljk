@@ -9,7 +9,7 @@
    against, since the spec itself never defines an encode side -- see
    av1.bool-encoder's own namespace docstring) -- structurally the same
    validation strategy av1.bitwriter-test uses against av1.bitreader."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.test :refer [deftest testing is]]
             [av1.bool-encoder :as be]
             [av1.bool-decoder :as bd]
             [av1.bitreader :as br]))

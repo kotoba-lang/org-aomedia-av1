@@ -7,7 +7,7 @@
    an encode-side fn (there is no independent 'known good' encoder test
    vector for a `reduced_still_picture_header=1` sequence header to check
    against)."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.test :refer [deftest testing is]]
             [av1.bitwriter :as bw]
             [av1.bitreader :as br]
             [av1.sequence-header :as sh]))
