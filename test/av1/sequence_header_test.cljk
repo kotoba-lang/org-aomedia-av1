@@ -4,7 +4,7 @@
    match the 64x48 dimensions we told ffmpeg to encode. This is the
    'real-data-off-by-one-would-be-caught' check requested for Phase 0,
    analogous to h264.sps-test cross-checking libx264's real 64x48 output."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
             [av1.sequence-header :as sh]

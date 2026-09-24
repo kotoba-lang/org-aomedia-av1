@@ -6,7 +6,7 @@
    frame_width/frame_height match the known 64x48 source and that
    frame_type/show_frame are the expected KEY_FRAME/1 for the very first
    (and only) frame of a fresh encode."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
             [av1.sequence-header :as sh]

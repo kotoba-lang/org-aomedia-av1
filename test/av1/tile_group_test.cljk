@@ -23,7 +23,7 @@
      independent assertion (unlike the 256x192 tree shape, which past the
      first leaf is not bit-exact against the real stream; see the
      namespace docstring's correctness caveat)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
             [av1.sequence-header :as sh]

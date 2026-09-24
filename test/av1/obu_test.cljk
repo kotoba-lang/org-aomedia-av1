@@ -4,7 +4,7 @@
    kotoba-lang/org-iso-h264's h264.sps-test (real libx264 output, checking
    that the parser correctly structures obu_type/obu_size/sequence-header
    fields against dimensions we control from the ffmpeg invocation)."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
             [av1.fixtures :as fixtures]))

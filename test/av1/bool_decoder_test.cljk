@@ -63,7 +63,7 @@
      SymbolMaxBits' = 1-1 = 0
    => read_bool returns bit = symbol = 1
       post-call state: symbol-range=32776 symbol-value=0 symbol-max-bits=0"
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.bool-decoder :as bd]))
 

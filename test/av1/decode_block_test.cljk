@@ -56,7 +56,7 @@
    choose SMOOTH_PRED (not merely DC_PRED, and not SMOOTH_V_PRED/
    SMOOTH_H_PRED) for the one BLOCK_32X32 leaf with both a real
    avail-above and a real avail-left neighbor."
-  (:require [clojure.test :refer [deftest is testing]]
+  (:require [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
             [av1.sequence-header :as sh]

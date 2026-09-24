@@ -6,7 +6,7 @@
    available check, since neither namespace has an external spec-provided
    'known good' encode-side test vector (the AV1 spec, like every codec
    spec this org has encoded for, only ever defines the decode/read side)."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.test :refer [deftest testing is]]
             [av1.bitwriter :as bw]
             [av1.bitreader :as br]))
 

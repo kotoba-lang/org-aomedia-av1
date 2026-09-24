@@ -6,7 +6,7 @@
    strategy av1.sequence-header-encode-test uses, and for the same reason
    (no independent 'known good' encoder test vector exists for this
    narrow scope)."
-  (:require [clojure.test :refer [deftest testing is]]
+  (:require [kotoba.test :refer [deftest testing is]]
             [av1.bitwriter :as bw]
             [av1.bitreader :as br]
             [av1.sequence-header :as sh]
