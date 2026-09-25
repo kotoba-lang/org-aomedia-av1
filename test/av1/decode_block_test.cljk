@@ -56,7 +56,7 @@
    choose SMOOTH_PRED (not merely DC_PRED, and not SMOOTH_V_PRED/
    SMOOTH_H_PRED) for the one BLOCK_32X32 leaf with both a real
    avail-above and a real avail-left neighbor."
-  (:require [kotoba.test :refer [deftest is testing]]
+  (:require [kotoba.lang.error :as kerror] [kotoba.test :refer [deftest is testing]]
             [av1.bitreader :as br]
             [av1.obu :as obu]
             [av1.sequence-header :as sh]
@@ -265,7 +265,7 @@
       (try
         (decode-block-fn (assoc tile-state :bd nil) 0 0 tg/BLOCK_16X16 false false)
         (is false "expected ex-info to be thrown, but decode-block-fn completed without throwing")
-        (catch clojure.lang.ExceptionInfo e
+        (catch kerror/ExceptionInfo e
           (is (= :unsupported-shared-chroma-block (:reason (ex-data e))))
           (is (= tg/BLOCK_16X16 (:mi-size (ex-data e)))))))))
 
@@ -601,7 +601,7 @@
           (try
             (tg/parse-frame-obu frame-obu seq-hdr {:decode-block-fn decode-block-fn})
             (is false "expected ex-info to be thrown, but decode completed without throwing")
-            (catch clojure.lang.ExceptionInfo e
+            (catch kerror/ExceptionInfo e
               (is (re-find #"only TX_32X32/TX_4X4 are supported transform sizes" (.getMessage e)))
               (is (= :unsupported-tx-size (:reason (ex-data e))))
               (is (= tg/BLOCK_16X16 (:mi-size (ex-data e))))
@@ -828,20 +828,20 @@
           frame-obu (find-obu bytes :obu-frame)
           frame-hdr (fh/parse (:reader-at-payload frame-obu) seq-hdr)]
       (testing "coded_lossless=1 is rejected (lossless uses the WHT, not DCT_DCT)"
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"CodedLossless"
+        (is (thrown-with-msg? kerror/ExceptionInfo #"CodedLossless"
                                (db/make-decode-block-fn (assoc frame-hdr :coded-lossless 1) seq-hdr))))
       (testing "non-monochrome with an unsupported chroma format (num_planes>1
                 but not 4:2:0) is rejected -- monochrome (mono_chrome=1) and
                 4:2:0 color (mono_chrome=0, num_planes=3, subsampling_x=1,
                 subsampling_y=1) are both supported, see av1.decode-block
                 namespace docstring's chroma section"
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mono_chrome"
+        (is (thrown-with-msg? kerror/ExceptionInfo #"mono_chrome"
                                (db/make-decode-block-fn frame-hdr (assoc seq-hdr :mono-chrome 0 :num-planes 3
                                                                           :subsampling-x 0 :subsampling-y 0)))
             "4:4:4 (subsampling 0,0) is rejected -- only 4:2:0 chroma is supported")
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"mono_chrome"
+        (is (thrown-with-msg? kerror/ExceptionInfo #"mono_chrome"
                                (db/make-decode-block-fn (assoc frame-hdr :num-planes 2) (assoc seq-hdr :mono-chrome 0 :subsampling-x 1 :subsampling-y 1)))
             "num_planes=2 (not 1 or 3) is rejected"))
       (testing "tx_mode other than TX_MODE_LARGEST is rejected (no tx_depth CDF support)"
-        (is (thrown-with-msg? clojure.lang.ExceptionInfo #"tx_mode"
+        (is (thrown-with-msg? kerror/ExceptionInfo #"tx_mode"
                                (db/make-decode-block-fn (assoc frame-hdr :tx-mode :tx-mode-select) seq-hdr)))))))
