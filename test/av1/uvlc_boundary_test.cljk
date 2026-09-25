@@ -53,5 +53,5 @@
   (testing "the largest encodable value is accepted"
     (is (some? (-> (bw/make-writer) (bw/uvlc 4294967294) bw/to-bytes))))
   (testing "the saturating value itself has no unique inverse and is refused"
-    (is (thrown? #?(:clj clojure.lang.ExceptionInfo :cljs js/Error)
+    (is (thrown? js/Error
                  (bw/uvlc (bw/make-writer) 4294967295)))))
