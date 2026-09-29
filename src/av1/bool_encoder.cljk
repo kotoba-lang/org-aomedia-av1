@@ -73,7 +73,7 @@
    all three as unresolved symbols for a `.cljc` file, not merely a style
    nitpick). Per this repo's runtime-priority policy (kotoba wasm >
    clojurewasm > cljs > nbb > (jvm/bb), see `com-junkawasaki/root`
-   CLAUDE.md), JVM is the last-resort choice for NEW app code -- this is
+   AGENTS.md), JVM is the last-resort choice for NEW app code -- this is
    that documented exception: a cljs-portable version would need to use
    `js/BigInt` (which DOES support correct arbitrary-precision bitwise ops
    natively in modern JS) instead of Clojure's `bigint`/`+'`/`*'`, a
